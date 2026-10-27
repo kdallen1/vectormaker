@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Lefty's Vector Maker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Lefty's <span>Vector Maker</span></div>
+    <input id="project-name" class="project-name" type="text" spellcheck="false" title="Project name (used for file names)">
+    <nav class="tabs">
+      <button data-mode="stripes">Stripes</button>
+      <button data-mode="generative">Generative</button>
+    </nav>
+    <div class="actions">
+      <button id="btn-undo" title="Undo (⌘Z)">↶ Undo</button>
+      <button id="btn-redo" title="Redo (⌘⇧Z)">↷ Redo</button>
+      <button id="btn-new" title="Start a new project">New</button>
+      <button id="btn-open" title="Open a saved project (.json)">Open…</button>
+      <button id="btn-save" title="Save project as .json so you can edit it later">Save project</button>
+      <button id="btn-export" class="primary" title="Download the tile as SVG">Export SVG</button>
+      <input id="file-open" type="file" accept=".json,application/json" hidden>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside id="panel" class="panel"></aside>
+    <section class="stage">
+      <div class="stage-bar">
+        <span id="size-readout"></span>
+        <label>Preview repeats
+          <select id="repeat">
+            <option value="1">1 × 1 (single tile)</option>
+            <option value="2">2 × 2</option>
+            <option value="3">3 × 3</option>
+            <option value="5">5 × 5</option>
+          </select>
+        </label>
+        <label><input id="outline" type="checkbox"> Outline tile</label>
+        <div class="zoom" title="Zoom: ⌘/Ctrl + scroll or pinch, or press + / − / 0">
+          <button id="zoom-out" class="icon" title="Zoom out (−)">−</button>
+          <button id="zoom-fit" title="Fit to window (0)">100%</button>
+          <button id="zoom-in" class="icon" title="Zoom in (+)">+</button>
+        </div>
+      </div>
+      <div id="preview" class="preview"></div>
+    </section>
+  </main>
+
+  <script src="js/util.js"></script>
+  <script src="js/stripes.js"></script>
+  <script src="js/generators.js"></script>
+  <script src="js/generators-art.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

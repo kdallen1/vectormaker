@@ -1,0 +1,95 @@
+:root {
+  --bg: #f4efe6;
+  --panel: #fffaf2;
+  --ink: #2b2420;
+  --muted: #7a6d62;
+  --line: #e2d7c6;
+  --accent: #a8432a;
+  --accent-ink: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  color: var(--ink);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--bg); }
+
+button, select, input { font: inherit; color: inherit; }
+button {
+  border: 1px solid var(--line); background: #fff; border-radius: 6px;
+  padding: 5px 10px; cursor: pointer;
+}
+button:hover { border-color: var(--muted); }
+button:disabled { opacity: .4; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.icon { padding: 3px 7px; min-width: 28px; }
+select, input[type=text], input[type=number] {
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; background: #fff;
+}
+input[type=number] { width: 80px; }
+input[type=color] { flex-shrink: 0; width: 34px; height: 28px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; cursor: pointer; }
+
+.topbar {
+  display: flex; align-items: center; gap: 14px; padding: 10px 16px;
+  background: var(--ink); color: #f4efe6;
+}
+.brand { font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
+.brand span { font-weight: 400; opacity: .7; }
+.topbar input.project-name { background: transparent; border-color: #5a4d44; color: #f4efe6; width: 220px; }
+.tabs { display: flex; gap: 4px; }
+.tabs button { background: transparent; color: #f4efe6; border-color: #5a4d44; }
+.tabs button.active { background: #f4efe6; color: var(--ink); }
+.actions { margin-left: auto; display: flex; gap: 6px; }
+.actions button:not(.primary) { background: transparent; color: #f4efe6; border-color: #5a4d44; }
+
+.layout { flex: 1; display: flex; min-height: 0; }
+.panel {
+  width: 440px; flex-shrink: 0; overflow-y: auto; background: var(--panel);
+  border-right: 1px solid var(--line); padding: 14px 16px 40px;
+}
+.panel h3 { margin: 18px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.panel h3:first-child { margin-top: 0; }
+.panel .blurb { color: var(--muted); margin: 0 0 10px; line-height: 1.4; }
+.panel .hint { color: var(--muted); font-size: 12px; margin: 6px 0; }
+
+.row { display: flex; align-items: center; gap: 6px; margin: 6px 0; flex-wrap: wrap; }
+label.row { flex-wrap: nowrap; }
+label.row input[type=checkbox] { flex-shrink: 0; }
+.field { margin: 10px 0; }
+.field > .label { display: block; margin-bottom: 3px; }
+.field .controls { display: flex; gap: 8px; align-items: center; }
+.field input[type=range] { flex: 1; }
+
+.stripe-list { list-style: none; margin: 0; padding: 0; }
+.stripe {
+  display: flex; align-items: center; gap: 4px; padding: 5px; border: 1px solid var(--line);
+  border-radius: 8px; margin-bottom: 5px; background: #fff;
+}
+.stripe.flash { outline: 2px solid var(--accent); }
+.stripe .idx { width: 20px; color: var(--muted); font-size: 12px; text-align: right; }
+.stripe input.hex { width: 72px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.stripe input[type=number] { width: 60px; }
+.stripe select { padding: 4px 2px; }
+.stripe button.icon { min-width: 26px; padding: 3px 5px; }
+.stripe .spacer { flex: 1; }
+
+.palette { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.swatch { position: relative; }
+.swatch button.remove {
+  position: absolute; top: -7px; right: -7px; width: 16px; height: 16px; padding: 0;
+  border-radius: 50%; font-size: 10px; line-height: 14px; display: none;
+}
+.swatch:hover button.remove { display: block; }
+
+.stage { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.stage-bar { display: flex; align-items: center; gap: 18px; padding: 8px 16px; border-bottom: 1px solid var(--line); color: var(--muted); }
+.stage-bar #size-readout { margin-right: auto; color: var(--ink); }
+.preview {
+  flex: 1; min-height: 0; padding: 24px; display: flex; overflow: auto;
+  background: repeating-conic-gradient(#e9e2d6 0% 25%, #f1ebe1 0% 50%) 50% / 20px 20px;
+}
+.preview svg { display: block; flex-shrink: 0; margin: auto; box-shadow: 0 2px 12px rgba(0,0,0,.15); background: #fff; }
+.preview .empty { color: var(--muted); margin: auto; }
+.zoom { display: flex; gap: 4px; }
+.zoom #zoom-fit { min-width: 64px; }
+.preview rect[data-stripe] { cursor: pointer; }
