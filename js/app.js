@@ -300,10 +300,9 @@ ${body}
   function stripesPanel() {
     const s = state.stripes;
     const items = s.items;
-    const move = (i, j) => { if (j < 0 || j >= items.length) return; [items[i], items[j]] = [items[j], items[i]]; changed({ panel: true }); };
-
     const list = h('ul', { class: 'stripe-list' }, items.map((st, i) =>
       h('li', { class: 'stripe', 'data-index': i },
+        h('span', { class: 'grip', title: 'Drag to reorder' }, '⠿'),
         h('span', { class: 'idx' }, String(i + 1)),
         colorInput(st.color, (c) => { st.color = c; changed(); }),
         h('input', { type: 'number', min: 0, step: 'any', value: st.width, title: 'Stripe width',
@@ -316,12 +315,12 @@ ${body}
           changed({ panel: true });
         }),
         h('span', { class: 'spacer' }),
-        h('button', { class: 'icon', title: 'Move left', onclick: () => move(i, i - 1) }, '↑'),
-        h('button', { class: 'icon', title: 'Move right', onclick: () => move(i, i + 1) }, '↓'),
         h('button', { class: 'icon', title: 'Duplicate (insert copy right after this stripe)', onclick: () => { items.splice(i + 1, 0, { ...st }); changed({ panel: true }); } }, '⧉'),
         h('button', { class: 'icon', title: 'Copy to end (append a copy after the last stripe)', onclick: () => { items.push({ ...st }); changed({ panel: true }); } }, '⇥'),
         h('button', { class: 'icon', title: 'Remove', onclick: () => { items.splice(i, 1); changed({ panel: true }); } }, '✕'),
       )));
+
+    enableStripeDrag(list, items);
 
     const total = h('div', { class: 'hint' });
     const updateTotal = () => {
@@ -356,8 +355,71 @@ ${body}
         } }, 'Mirror'),
         h('button', { onclick: () => { if (confirm('Remove all stripes?')) { items.length = 0; changed({ panel: true }); } } }, 'Clear'),
       ),
-      h('p', { class: 'hint' }, 'Mirror appends the stripes in reverse order, skipping the last one so the center stripe is not doubled. Click a stripe in the preview to find it in this list.'),
+      h('p', { class: 'hint' }, 'Drag rows by the ⠿ grip to reorder. Mirror appends the stripes in reverse order, skipping the last one so the center stripe is not doubled. Click a stripe in the preview to find it in this list.'),
     ];
+  }
+
+  // Drag a stripe row (by its grip or any non-control part) to reorder. Other rows slide
+  // out of the way, and the preview shows the new order live while dragging.
+  function enableStripeDrag(list, items) {
+    list.addEventListener('pointerdown', (e) => {
+      const row = e.target.closest('.stripe');
+      if (!row || e.button !== 0 || e.target.closest('input, select, button')) return;
+      e.preventDefault();
+      const rows = [...list.children];
+      const from = rows.indexOf(row);
+      const original = items.slice();
+      const panel = $('#panel');
+      const listTop = () => list.getBoundingClientRect().top;
+      // Row geometry in list coordinates, captured before anything moves.
+      const base = listTop();
+      const geo = rows.map((r) => { const b = r.getBoundingClientRect(); return { top: b.top - base, mid: b.top - base + b.height / 2 }; });
+      const pitch = rows.length > 1 ? geo[1].top - geo[0].top : row.offsetHeight;
+      const startY = e.clientY - base;
+      let to = from;
+
+      row.classList.add('dragging');
+      list.classList.add('drag-active');
+
+      const onMove = (ev) => {
+        // Auto-scroll when dragging near the top or bottom of the panel.
+        const pb = panel.getBoundingClientRect();
+        if (ev.clientY < pb.top + 40) panel.scrollTop -= 12;
+        else if (ev.clientY > pb.bottom - 40) panel.scrollTop += 12;
+
+        const dy = ev.clientY - listTop() - startY;
+        row.style.transform = `translateY(${dy}px)`;
+        const center = geo[from].mid + dy;
+        let target = 0;
+        geo.forEach((g, i) => { if (i !== from && g.mid < center) target++; });
+        if (target === to) return;
+        to = target;
+        rows.forEach((r, i) => {
+          if (i === from) return;
+          const shift = from < to && i > from && i <= to ? -pitch : to < from && i >= to && i < from ? pitch : 0;
+          r.style.transform = shift ? `translateY(${shift}px)` : '';
+        });
+        // Live preview of the tentative order.
+        const order = original.slice();
+        order.splice(to, 0, order.splice(from, 1)[0]);
+        items.splice(0, items.length, ...order);
+        cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(renderPreview);
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        list.classList.remove('drag-active');
+        row.classList.remove('dragging');
+        rows.forEach((r) => { r.style.transform = ''; });
+        // Re-render the panel (rows renumber) and record one undo step if the order changed.
+        if (to !== from) changed({ panel: true });
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+    });
   }
 
   function paramField(def, params) {
