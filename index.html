@@ -23,6 +23,7 @@
       <button id="btn-export" class="primary" title="Download the tile as SVG">Export SVG</button>
       <input id="file-open" type="file" accept=".json,application/json" hidden>
       <input id="file-import" type="file" accept=".json,.svg,application/json,image/svg+xml" hidden>
+      <input id="file-picture" type="file" accept="image/*,.heic,.heif,image/heic,image/heif" hidden>
     </div>
   </header>
 
@@ -30,6 +31,7 @@
     <aside id="panel" class="panel"></aside>
     <section class="stage">
       <div class="stage-bar">
+        <button id="toggle-panel" class="icon" title="Hide the side panel (\)">◧</button>
         <span id="size-readout"></span>
         <label>Preview repeats
           <select id="repeat">
@@ -56,6 +58,8 @@
   <script src="js/generators.js"></script>
   <script src="js/generators-art.js"></script>
   <script src="js/generators-camo.js"></script>
+  <script src="js/generators-aztec.js"></script>
+  <script src="js/inspire.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

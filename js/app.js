@@ -27,6 +27,7 @@
     canvas: { width: 8, height: 8 }, // in `unit`
     stripes: {
       fitWidth: true,
+      effects: VM.defaultStripeEffects(),
       bg: '#ffffff',
       items: [
         { color: '#1f3557', width: 0.5, unit: 'in' },
@@ -40,7 +41,7 @@
       params: Object.fromEntries(Object.entries(VM.GENERATORS).map(([k, g]) => [k, VM.defaultParams(g)])),
       palette: structuredClone(PALETTES['Rodeo']),
     },
-    view: { repeat: 3, outline: true, zoom: 1 },
+    view: { repeat: 3, outline: true, zoom: 1, panelHidden: false },
     // Imported SVG art used by pattern stripes, keyed by id. Kept out of undo history.
     assets: {},
     // Set while a pattern stripe is open in Generative mode: { index, gen, canvas }.
@@ -58,6 +59,8 @@
     if (!VM.GENERATORS[out.gen.type]) out.gen.type = d.gen.type;
     if (!VM.UNITS.includes(out.unit)) out.unit = d.unit;
     out.assets = s.assets || {};
+    // Effects: fill in any effect or setting missing from older project files.
+    out.stripes.effects = Object.fromEntries(Object.entries(d.stripes.effects).map(([k, def]) => [k, { ...def, ...(s.stripes?.effects?.[k] || {}) }]));
     return out;
   }
 
@@ -169,30 +172,43 @@
   // ------------------------------------------------------------------ tile
   // Returns { W, H, bg, body } in px for the current mode.
   function buildTile() {
-    const H = VM.toPx(state.canvas.height, state.unit);
+    let H = VM.toPx(state.canvas.height, state.unit);
     if (state.mode === 'stripes') {
+      // Plaid sets the height: the stripe sequence has to fit down the tile exactly.
+      H = VM.plaidHeight(state.stripes.items, state.stripes.effects) ?? H;
       const total = VM.stripesTotalPx(state.stripes.items);
       const W = state.stripes.fitWidth ? total : VM.toPx(state.canvas.width, state.unit);
-      return { W, H, bg: state.stripes.bg, body: VM.renderStripes(state.stripes.items, H, state.assets) };
+      // Plain stripes sit entirely inside the tile, so they need no clipping mask; pattern
+      // stripes clip their own copies, which can spill past the tile.
+      // The background only shows if the stripes stop short of the canvas width or an
+      // imported SVG has see-through areas; otherwise leave the hidden rectangle out.
+      const items = state.stripes.items;
+      return { W, H, bg: state.stripes.bg, body: VM.renderStripes(items, H, state.assets, W, state.stripes.effects),
+        needsClip: items.some((s) => s.kind === 'pattern'),
+        showBg: total < W - 1e-6 || items.some((s) => s.pattern?.source === 'svg') };
     }
     const W = VM.toPx(state.canvas.width, state.unit);
     const gen = VM.GENERATORS[state.gen.type];
     const pal = state.gen.palette.colors.length ? state.gen.palette : { ...state.gen.palette, colors: ['#000000'] };
-    return { W, H, bg: pal.bg, body: W > 0 && H > 0 ? gen.render(W, H, state.gen.params[state.gen.type], pal) : '' };
+    return { W, H, bg: pal.bg, body: W > 0 && H > 0 ? gen.render(W, H, state.gen.params[state.gen.type], pal) : '', needsClip: true, showBg: true };
   }
 
   function exportSvg(tile) {
-    const { W, H, bg, body } = tile;
-    const u = state.unit;
-    const dim = (px) => VM.n(VM.fromPx(px, u)) + u;
+    const { W, H, bg, body, needsClip, showBg } = tile;
+    // Size in points (1/72 in, the same as an Illustrator px), so width/height use exactly the
+    // same numbers as the viewBox. Rounding them in inches or cm can leave the page a hair
+    // off the drawing's proportions, which makes Illustrator rescale and shift everything.
+    const dim = (px) => VM.n(px) + 'pt';
+    // data-stripe attributes are only for click-to-find in the preview.
+    const content = (showBg ? `<rect width="${VM.n(W)}" height="${VM.n(H)}" fill="${VM.esc(bg)}"/>\n` : '') + body.replace(/ data-stripe="\d+"/g, '');
+    // A clipping mask only when shapes spill past the tile edge; plain stripes don't need one.
+    const clipped = needsClip
+      ? `<defs><clipPath id="tile"><rect width="${VM.n(W)}" height="${VM.n(H)}"/></clipPath></defs>\n<g clip-path="url(#tile)">\n${content}\n</g>`
+      : content;
     return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${dim(W)}" height="${dim(H)}" viewBox="0 0 ${VM.n(W)} ${VM.n(H)}">
 <title>${VM.esc(state.name)}</title>
-<defs><clipPath id="tile"><rect width="${VM.n(W)}" height="${VM.n(H)}"/></clipPath></defs>
-<g clip-path="url(#tile)">
-<rect width="${VM.n(W)}" height="${VM.n(H)}" fill="${VM.esc(bg)}"/>
-${body}
-</g>
+${clipped}
 </svg>
 `;
   }
@@ -210,7 +226,7 @@ ${body}
       return;
     }
     $('#size-readout').textContent =
-      `Tile: ${VM.fmtUnit(W, u)} × ${VM.fmtUnit(H, u)}` + (u === 'px' ? '' : `  (${Math.round(W)} × ${Math.round(H)} px @ 96/in)`);
+      `Tile: ${VM.fmtUnit(W, u)} × ${VM.fmtUnit(H, u)}` + (u === 'px' ? '' : `  (${Math.round(W)} × ${Math.round(H)} px @ 72/in)`);
 
     const n = state.view.repeat;
     const content = `<rect width="${VM.n(W)}" height="${VM.n(H)}" fill="${VM.esc(tile.bg)}"/>${tile.body}`;
@@ -243,8 +259,8 @@ ${body}
   }
 
   // ---- infinite preview
-  // Top-left of the view in tile coordinates. `centered` is cleared to re-center the
-  // outlined tile the next time the infinite view is drawn.
+  // The tile-coordinate point shown at the center of the view. `centered` is cleared to
+  // re-center the outlined tile the next time the infinite view is drawn.
   const pan = { x: 0, y: 0, centered: false };
   const isInfinite = () => state.view.repeat === 0 && lastTile && lastTile.W > 0 && lastTile.H > 0;
   // Screen px per tile px. At 100% zoom about three tiles span the shorter side of the view.
@@ -259,11 +275,14 @@ ${body}
     if (!svg || !isInfinite()) return;
     const s = infiniteScale();
     if (!pan.centered) {
-      pan.x = lastTile.W / 2 - box.clientWidth / s / 2;
-      pan.y = lastTile.H / 2 - box.clientHeight / s / 2;
+      pan.x = lastTile.W / 2;
+      pan.y = lastTile.H / 2;
       pan.centered = true;
     }
-    const vb = [pan.x, pan.y, box.clientWidth / s, box.clientHeight / s].map(VM.n);
+    // Anchoring the center (not the corner) keeps the view steady when the preview
+    // resizes, e.g. when the side panel is hidden or shown.
+    const vw = box.clientWidth / s, vh = box.clientHeight / s;
+    const vb = [pan.x - vw / 2, pan.y - vh / 2, vw, vh].map(VM.n);
     svg.setAttribute('viewBox', vb.join(' '));
     for (const r of svg.querySelectorAll('.pv-cover')) {
       r.setAttribute('x', vb[0]); r.setAttribute('y', vb[1]); r.setAttribute('width', vb[2]); r.setAttribute('height', vb[3]);
@@ -327,10 +346,10 @@ ${body}
       const rect = box.getBoundingClientRect();
       const ax = (clientX ?? rect.left + rect.width / 2) - rect.left, ay = (clientY ?? rect.top + rect.height / 2) - rect.top;
       const s0 = infiniteScale();
-      const wx = pan.x + ax / s0, wy = pan.y + ay / s0;
+      const wx = pan.x + (ax - rect.width / 2) / s0, wy = pan.y + (ay - rect.height / 2) / s0;
       state.view.zoom = z;
       const s1 = infiniteScale();
-      pan.x = wx - ax / s1; pan.y = wy - ay / s1;
+      pan.x = wx - (ax - rect.width / 2) / s1; pan.y = wy - (ay - rect.height / 2) / s1;
       updateInfiniteView();
       saveSoon();
       return;
@@ -367,10 +386,11 @@ ${body}
     }
   }, { passive: false });
   document.addEventListener('keydown', (e) => {
-    if (e.target.closest('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target.closest?.('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === '+' || e.key === '=') zoomBy(1.25);
     else if (e.key === '-' || e.key === '_') zoomBy(1 / 1.25);
     else if (e.key === '0') setZoom(1);
+    else if (e.key === '\\') togglePanel();
   });
 
   // Clicking a stripe in the single-tile preview highlights its row in the inventory.
@@ -387,7 +407,7 @@ ${body}
   }
 
   // ------------------------------------------------------------------ panel
-  function canvasSection({ widthEditable }) {
+  function canvasSection({ widthEditable, heightNote = null }) {
     const unitChange = (u) => {
       // Keep the physical size the same when switching units.
       for (const k of ['width', 'height']) {
@@ -406,7 +426,7 @@ ${body}
       h('h3', {}, 'Canvas (one repeat)'),
       h('div', { class: 'row' },
         widthEditable ? [h('label', {}, 'W ', dimInput('width'))] : null,
-        h('label', {}, 'H ', dimInput('height')),
+        heightNote ? h('span', { class: 'hint' }, heightNote) : h('label', {}, 'H ', dimInput('height')),
         unitSelect(state.unit, unitChange)),
     ];
   }
@@ -450,11 +470,9 @@ ${body}
           colorInput(st.color2, (c) => { st.color2 = c; changed(); }),
           h('select', { title: 'Gradient shape', onchange: (e) => { st.shape = e.target.value; changed(); } },
             Object.entries(VM.GRADIENT_SHAPES).map(([k, label]) => h('option', { value: k, selected: k === st.shape }, label))),
-          h('label', { title: '0 = smooth gradient. Any other number splits the stripe into that many solid horizontal bands.' }, 'steps ',
-            h('input', { type: 'number', min: 0, max: 200, step: 1, value: st.steps || 0, class: 'steps',
-              oninput: (e) => { st.steps = Math.max(0, Math.round(num(e.target.value))); changed(); } })),
           h('button', { class: 'icon', title: 'Swap start and end colors', onclick: () => { [st.color, st.color2] = [st.color2, st.color]; changed({ panel: true }); } }, '⇄'),
         ) : null,
+        st.kind !== 'pattern' && st.gradient ? lookControl(st) : null,
         st.kind !== 'pattern' && st.gradient ? shiftControl(st) : null,
       )));
 
@@ -475,13 +493,15 @@ ${body}
     };
 
     return [
-      ...canvasSection({ widthEditable: !s.fitWidth }),
+      ...canvasSection({ widthEditable: !s.fitWidth, heightNote: s.effects.plaid.on ? 'Height follows the stripes (plaid is on)' : null }),
       h('label', { class: 'row' },
         h('input', { type: 'checkbox', checked: s.fitWidth, onchange: (e) => { s.fitWidth = e.target.checked; changed({ panel: true }); } }),
         'Canvas width = total stripe width (seamless repeat)'),
       !s.fitWidth ? h('div', { class: 'hint' }, 'Stripes past the canvas width are cut off; leftover space shows the background.') : null,
       h('div', { class: 'row' }, h('span', {}, 'Background'), colorInput(s.bg, (c) => { s.bg = c; changed(); })),
 
+      ...stripeEffectsSection(),
+      ...stripesInspireSection(),
       h('h3', {}, 'Stripe inventory (left → right)'),
       list,
       total,
@@ -508,7 +528,7 @@ ${body}
   function currentGenPattern() {
     const W = VM.toPx(state.canvas.width, state.unit), H = VM.toPx(state.canvas.height, state.unit);
     return { source: 'gen', type: state.gen.type, params: structuredClone(state.gen.params[state.gen.type]),
-      palette: structuredClone(state.gen.palette), aspect: W > 0 && H > 0 ? W / H : 1, height: H > 0 ? H : 96 };
+      palette: structuredClone(state.gen.palette), aspect: W > 0 && H > 0 ? W / H : 1, height: H > 0 ? H : 72 };
   }
 
   function addPatternStripe(pattern) {
@@ -608,7 +628,8 @@ ${body}
     const len = (v) => {
       const m = /^\s*([\d.]+)\s*(px|in|cm|mm|pt)?\s*$/.exec(v || '');
       if (!m) return 0;
-      return parseFloat(m[1]) * ({ px: 1, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, pt: 96 / 72 }[m[2] || 'px']);
+      // Same convention as the rest of the app (and Illustrator): 72 px per inch.
+      return parseFloat(m[1]) * ({ px: 1, pt: 1, in: 72, cm: 72 / 2.54, mm: 72 / 25.4 }[m[2] || 'px']);
     };
     let vb = (root.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
     if (vb.length !== 4 || vb.some((v) => !Number.isFinite(v)) || vb[2] <= 0 || vb[3] <= 0) {
@@ -633,6 +654,35 @@ ${body}
     const ser = new XMLSerializer();
     const markup = [...root.childNodes].filter((nd) => nd.nodeType === 1 && nd.nodeName !== 'title').map((nd) => ser.serializeToString(nd)).join('');
     return { name, viewBox: vb, heightPx, markup };
+  }
+
+  // How a gradient stripe is drawn (smooth, steps, dither, halftone, lines) and the settings
+  // for that look.
+  function lookControl(st) {
+    const look = VM.gradientLook(st);
+    const numBox = (key, label, title, def, { min = 0, max = 500, step = 1, int = false } = {}) =>
+      h('label', { title }, label + ' ', h('input', { type: 'number', min, max, step, value: st[key] ?? def, class: 'steps',
+        oninput: (e) => { const v = num(e.target.value); st[key] = int ? Math.max(min, Math.round(v)) : Math.max(min, v); changed(); } }));
+    const settings = {
+      smooth: [],
+      steps: [numBox('steps', 'steps', 'Number of solid horizontal bands', 6, { min: 1, max: 200, int: true })],
+      dither: [
+        h('select', { title: 'Dither pattern', onchange: (e) => { st.dither = e.target.value; changed(); } },
+          Object.entries(VM.DITHER_METHODS).map(([k, label]) => h('option', { value: k, selected: k === (st.dither || 'bayer') }, label))),
+        numBox('levels', 'levels', 'Colors in the ramp: 2 = pure two-color dither, more adds in-between shades', 2, { min: 2, max: 12, int: true }),
+        numBox('pixel', 'pixel', 'Pixel size (px)', 3, { min: 0.5, step: 0.5 }),
+      ],
+      halftone: [numBox('cell', 'dot spacing', 'Distance between dot centers (px)', 6, { min: 1, step: 0.5 })],
+      lines: [numBox('spacing', 'line spacing', 'Distance between lines (px)', 4, { min: 1, step: 0.5 })],
+    };
+    return h('div', { class: 'gradline lookline' },
+      h('span', { class: 'arrow' }, 'look'),
+      h('select', { title: 'How the fade is drawn. Everything except Smooth is solid-color shapes, good for screen printing.', onchange: (e) => {
+        st.look = e.target.value;
+        if (st.look === 'steps' && !(st.steps > 0)) st.steps = 6;
+        changed({ panel: true });
+      } }, Object.entries(VM.GRADIENT_LOOKS).map(([k, label]) => h('option', { value: k, selected: k === look }, label))),
+      ...settings[look]);
   }
 
   // Slider + number for sliding a stripe's fade up or down (percent of tile height, wrapping).
@@ -763,6 +813,7 @@ ${body}
           h('button', { class: 'primary', onclick: () => finishPatternEdit(true) }, 'Save to stripe'),
           h('button', { onclick: () => finishPatternEdit(false) }, 'Cancel'))) : null,
       ...canvasSection({ widthEditable: true }),
+      ...inspireSection(),
       h('h3', {}, 'Pattern'),
       h('select', { onchange: (e) => { g.type = e.target.value; changed({ panel: true }); } },
         Object.entries(VM.GENERATORS).map(([k, x]) => h('option', { value: k, selected: k === g.type }, x.name))),
@@ -783,6 +834,183 @@ ${body}
     ];
   }
 
+  // ---- stripe effects
+  // One box per effect: a checkbox, and when it's on, its description and settings.
+  function stripeEffectsSection() {
+    const fx = state.stripes.effects;
+    return [
+      h('h3', {}, 'Effects'),
+      Object.entries(VM.STRIPE_EFFECTS).map(([key, def]) => h('div', { class: 'effect' + (fx[key].on ? ' on' : '') },
+        h('label', { class: 'row' },
+          h('input', { type: 'checkbox', checked: fx[key].on, onchange: (e) => { fx[key].on = e.target.checked; changed({ panel: true }); } }),
+          h('strong', {}, def.name)),
+        fx[key].on ? [h('p', { class: 'hint' }, def.blurb), ...def.params.map((d) => paramField(d, fx[key]))] : null)),
+      h('p', { class: 'hint' }, 'Effects apply to solid and gradient stripes; pattern stripes stay as they are.'),
+    ];
+  }
+
+  // ---- inspire from a picture
+  // The picture and its analysis live only in this session (not in the project file), and
+  // are shared by both modes: pattern ideas in Generative, stripe ideas in Stripes.
+  let inspiration = null; // { url, img, analysis, round, ideas, stripeRound, stripeWidth }
+
+  const loadImage = (url) => new Promise((res, rej) => { const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = url; });
+
+  // HEIC (iPhone photos): Safari reads it natively; elsewhere a bundled decoder converts it
+  // to JPEG. The decoder is ~3 MB, so it's only loaded the first time it's needed.
+  const isHeicFile = (file) => /\.(heic|heif)$/i.test(file.name) || /image\/hei[cf]/i.test(file.type);
+  let heicLoader = null;
+  function loadHeicDecoder() {
+    heicLoader ??= new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'vendor/heic-to.js';
+      s.onload = () => (window.HeicTo ? res(window.HeicTo) : rej(new Error('the HEIC decoder failed to start')));
+      s.onerror = () => { heicLoader = null; rej(new Error('HEIC support isn\'t installed (vendor/heic-to.js is missing)')); };
+      document.head.append(s);
+    });
+    return heicLoader;
+  }
+
+  async function loadInspiration(file) {
+    let url = URL.createObjectURL(file);
+    let img;
+    try {
+      img = await loadImage(url);
+    } catch {
+      URL.revokeObjectURL(url);
+      if (!isHeicFile(file)) throw new Error("the browser can't read that image format (try JPG, PNG, or HEIC)");
+      const HeicTo = await loadHeicDecoder();
+      const jpeg = await HeicTo({ blob: file, type: 'image/jpeg', quality: 0.92 });
+      url = URL.createObjectURL(jpeg);
+      img = await loadImage(url).catch(() => { throw new Error("couldn't decode that HEIC photo"); });
+    }
+    // Analyze a small copy: plenty for color and texture, and fast.
+    const scale = Math.min(1, 160 / Math.max(img.naturalWidth, img.naturalHeight));
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    cv.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    const pixels = ctx.getImageData(0, 0, cv.width, cv.height);
+    const analysis = VM.analyzeImage(pixels);
+    if (inspiration) URL.revokeObjectURL(inspiration.url);
+    inspiration = { url, img: pixels, analysis, round: 0, ideas: VM.suggestPatterns(analysis, 0), stripeRound: 0, stripeWidth: inspiration?.stripeWidth || 144 };
+    renderPanel();
+  }
+
+  function applyIdea(idea) {
+    const g = state.gen;
+    g.type = idea.type;
+    g.params[idea.type] = { ...VM.defaultParams(VM.GENERATORS[idea.type]), ...structuredClone(idea.params) };
+    g.palette = structuredClone(idea.palette);
+    changed({ panel: true });
+  }
+
+  const pickPictureBtn = (label) => h('button', { onclick: () => $('#file-picture').click() }, label);
+  const closePictureBtn = () => h('button', { class: 'icon', title: 'Close', onclick: () => { URL.revokeObjectURL(inspiration.url); inspiration = null; renderPanel(); } }, '✕');
+
+  // Picture thumbnail, its palette, and how it reads. Shared by both modes.
+  function inspireHeader(title) {
+    const { analysis } = inspiration;
+    return [
+      h('h3', {}, title),
+      h('div', { class: 'inspire' },
+        h('img', { src: inspiration.url, alt: 'Your picture' }),
+        h('div', {},
+          h('div', { class: 'palette' }, analysis.palette.slice(0, 6).map((p) =>
+            h('span', { class: 'chip', style: `background:${p.hex}`, title: `${p.hex} · ${Math.round(p.weight * 100)}% of the picture` }))),
+          h('p', { class: 'hint' }, 'Reads as: ' + analysis.describe.join(', ') + '.'))),
+    ];
+  }
+
+  function inspireSection() {
+    if (!inspiration) {
+      return [
+        h('h3', {}, 'Inspire from a picture'),
+        h('div', { class: 'row' }, pickPictureBtn('Choose a picture…')),
+        h('p', { class: 'hint' }, 'Reads the photo\'s colors and texture, then suggests patterns that feel like it.'),
+      ];
+    }
+    const { analysis, ideas } = inspiration;
+    const W = VM.toPx(state.canvas.width, state.unit), H = VM.toPx(state.canvas.height, state.unit);
+    const cards = W > 0 && H > 0 ? ideas.map((idea) => {
+      const card = h('button', { class: 'idea', title: `Use ${idea.label}`, onclick: () => applyIdea(idea) });
+      const isCurrent = state.gen.type === idea.type && JSON.stringify(state.gen.palette) === JSON.stringify(idea.palette) &&
+        Object.entries(idea.params).every(([k, v]) => state.gen.params[idea.type][k] === v);
+      if (isCurrent) card.classList.add('current');
+      card.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${VM.n(W)} ${VM.n(H)}" preserveAspectRatio="xMidYMid slice">${VM.patternTile({ source: 'gen', ...idea }, null, W, H)}</svg>`;
+      card.append(h('span', {}, idea.label));
+      return card;
+    }) : [];
+    return [
+      ...inspireHeader('Inspired by your picture'),
+      h('div', { class: 'ideas' }, cards),
+      h('div', { class: 'row' },
+        h('button', { title: 'Show a different set of suggestions', onclick: () => {
+          inspiration.round++;
+          inspiration.ideas = VM.suggestPatterns(analysis, inspiration.round);
+          renderPanel();
+        } }, 'More ideas'),
+        h('button', { title: "Apply just the picture's colors to the current pattern", onclick: () => {
+          state.gen.palette = VM.inspirePalette(analysis, 'area');
+          changed({ panel: true });
+        } }, 'Use palette only'),
+        pickPictureBtn('New picture…'),
+        closePictureBtn()),
+      h('p', { class: 'hint' }, 'Click an idea to load it below, then adjust it like any pattern.'),
+    ];
+  }
+
+  // Stripe sets drawn from the picture, sized to a chosen repeat width.
+  function stripesInspireSection() {
+    if (!inspiration) {
+      return [
+        h('h3', {}, 'Inspire from a picture'),
+        h('div', { class: 'row' }, pickPictureBtn('Choose a picture…')),
+        h('p', { class: 'hint' }, 'Turns a photo\'s colors, and the order they appear in, into stripe sets.'),
+      ];
+    }
+    // Snap widths to tidy sizes in the project's unit: 1/32 in, 1 mm, or whole px.
+    const unit = state.unit;
+    const step = { in: VM.toPx(1 / 32, 'in'), cm: VM.toPx(0.1, 'cm'), px: 1 }[unit];
+    const ideas = VM.suggestStripes(inspiration.analysis, inspiration.img, { total: inspiration.stripeWidth, step, unit, round: inspiration.stripeRound });
+    const T = inspiration.stripeWidth;
+    const cards = ideas.map((idea) => {
+      const card = h('button', { class: 'idea', title: `Use ${idea.label} (replaces your stripes; undo brings them back)`, onclick: () => {
+        state.stripes.items = structuredClone(idea.items);
+        state.stripes.fitWidth = true;
+        changed({ panel: true });
+      } });
+      // Two repeats side by side, so you can see how the set meets itself.
+      const body = VM.renderStripes(idea.items, T);
+      card.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${VM.n(2 * T)} ${VM.n(T)}" preserveAspectRatio="none">${body}<g transform="translate(${VM.n(T)} 0)">${body}</g></svg>`;
+      card.append(h('span', {}, idea.label));
+      return card;
+    });
+    const round = (v) => (unit === 'px' ? Math.round(v) : Math.round(v * 1000) / 1000);
+    return [
+      ...inspireHeader('Stripes from your picture'),
+      h('div', { class: 'row' },
+        h('label', { title: 'Total width of one repeat of the suggested stripes' }, 'Repeat width ',
+          h('input', { type: 'number', min: 0, step: 'any', value: round(VM.fromPx(T, unit)),
+            onchange: (e) => { const v = VM.toPx(num(e.target.value), unit); if (v > 0) { inspiration.stripeWidth = v; renderPanel(); } } }),
+          ' ' + unit)),
+      h('div', { class: 'ideas stripe-ideas' }, cards),
+      h('div', { class: 'row' },
+        h('button', { title: 'Scan other parts of the picture and try other orders', onclick: () => { inspiration.stripeRound++; renderPanel(); } }, 'More ideas'),
+        pickPictureBtn('New picture…'),
+        closePictureBtn()),
+      h('p', { class: 'hint' }, 'Click an idea to replace your stripes with it (undo brings them back). "Scan" ideas read the picture\'s colors in order, left to right or top to bottom.'),
+    ];
+  }
+
+  $('#file-picture').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try { await loadInspiration(file); } catch (err) { alert('Could not read that picture: ' + err.message); }
+  });
+
   function renderPanel() {
     const panel = $('#panel');
     const scroll = panel.scrollTop;
@@ -792,6 +1020,7 @@ ${body}
     $('#project-name').value = state.name;
     $('#repeat').value = String(state.view.repeat);
     $('#outline').checked = state.view.outline;
+    applyPanelVisibility();
   }
 
   // ------------------------------------------------------------------ top bar
@@ -814,6 +1043,22 @@ ${body}
   $('#project-name').addEventListener('input', (e) => { state.name = e.target.value; changed(); });
   $('#repeat').addEventListener('change', (e) => { state.view.repeat = +e.target.value; pan.centered = false; changed(); });
   $('#outline').addEventListener('change', (e) => { state.view.outline = e.target.checked; changed(); });
+
+  // Hide or show the left panel; the preview grows into the freed space.
+  function applyPanelVisibility() {
+    const hidden = !!state.view.panelHidden;
+    $('.layout').classList.toggle('panel-hidden', hidden);
+    const btn = $('#toggle-panel');
+    btn.classList.toggle('on', hidden);
+    btn.title = hidden ? 'Show the side panel (\\)' : 'Hide the side panel (\\)';
+  }
+  function togglePanel() {
+    state.view.panelHidden = !state.view.panelHidden;
+    applyPanelVisibility();
+    fitPreview();
+    saveSoon();
+  }
+  $('#toggle-panel').addEventListener('click', togglePanel);
 
   $('#btn-export').addEventListener('click', () => {
     const tile = buildTile();

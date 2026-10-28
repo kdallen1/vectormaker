@@ -2,8 +2,10 @@
 window.VM = window.VM || {};
 
 (function (VM) {
-  // SVG user units are CSS pixels: 96 per inch by spec.
-  VM.PX_PER = { px: 1, in: 96, cm: 96 / 2.54 };
+  // Units follow Illustrator: 72 px per inch (an Illustrator px is a point). Exported
+  // coordinates then open in Illustrator with exactly the numbers entered here, with no
+  // 96-vs-72 rescaling.
+  VM.PX_PER = { px: 1, in: 72, cm: 72 / 2.54 };
   VM.UNITS = ['px', 'in', 'cm'];
 
   VM.toPx = (value, unit) => value * VM.PX_PER[unit];

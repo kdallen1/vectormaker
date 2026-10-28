@@ -297,59 +297,141 @@
   };
 
   // ---------------------------------------------------------------- Wave bands
+  const frac = (t) => t - Math.floor(t);
+  const tri = (t) => 1 - 4 * Math.abs(frac(t + 0.25) - 0.5); // triangle wave, peak at t = 0.25
+  // Each shape is one period over t in [0, 1), with values in [-1, 1].
   const WAVE_SHAPES = {
     sine: (t) => Math.sin(TAU * t),
-    zigzag: (t) => 1 - 4 * Math.abs((((t + 0.25) % 1) + 1) % 1 - 0.5),
+    zigzag: tri,
     scallop: (t) => 1 - 2 * Math.abs(Math.sin(Math.PI * t)),
+    arches: (t) => 2 * Math.abs(Math.sin(Math.PI * t)) - 1,
     square: (t) => Math.tanh(6 * Math.sin(TAU * t)),
+    sawtooth: (t) => 2 * frac(t) - 1,
+    steps: (t, p) => { const S = Math.max(2, p.steps); return (Math.round(((tri(t) + 1) / 2) * (S - 1)) / (S - 1)) * 2 - 1; },
+    noise: null, // per-edge noise row, handled in render
   };
+  const JUMPY = new Set(['sawtooth', 'steps']); // shapes with vertical jumps to locate exactly
 
   const waves = {
     name: 'Wave bands',
-    blurb: 'Filled bands bounded by periodic waves: sine, zigzag/chevron, scallop, or soft square.',
+    blurb: 'Filled bands bounded by periodic waves. Mix shapes with harmonics, mirrored edges, swelling amplitude, uneven bands, and organic wobble. Steps and sawtooth give crisp terraced, Southwestern-style edges.',
     params: [
       { key: 'shape', label: 'Wave shape', type: 'select', options: Object.keys(WAVE_SHAPES), default: 'zigzag' },
+      { key: 'steps', label: 'Step levels', type: 'int', min: 2, max: 16, default: 4, when: { shape: ['steps'] } },
       { key: 'direction', label: 'Bands run', type: 'select', options: ['horizontal', 'vertical'], default: 'horizontal' },
       { key: 'bands', label: 'Bands per tile', type: 'int', min: 1, max: 60, default: 6 },
       { key: 'freq', label: 'Waves across tile', type: 'int', min: 1, max: 40, default: 4 },
       { key: 'amp', label: 'Amplitude (% of band)', type: 'float', min: 0, max: 300, step: 1, default: 60 },
       { key: 'drift', label: 'Phase drift (waves per tile)', type: 'int', min: -10, max: 10, default: 0 },
+      { key: 'mirror', label: 'Mirror every other edge (ribbons & diamonds)', type: 'bool', default: false },
+      { key: 'harmonic', label: 'Harmonic (× frequency, 0 = off)', type: 'int', min: 0, max: 12, default: 0 },
+      { key: 'harmonicAmp', label: 'Harmonic strength (%)', type: 'float', min: 0, max: 100, step: 1, default: 30 },
+      { key: 'swell', label: 'Amplitude swell (cycles over the bands, 0 = off)', type: 'int', min: 0, max: 10, default: 0 },
+      { key: 'swellDepth', label: 'Swell depth (%)', type: 'float', min: 0, max: 100, step: 1, default: 70 },
+      { key: 'vary', label: 'Uneven band heights (%)', type: 'float', min: 0, max: 90, step: 1, default: 0 },
+      { key: 'wobble', label: 'Organic wobble (%)', type: 'float', min: 0, max: 100, step: 1, default: 0 },
+      { key: 'outline', label: 'Outline between bands (px, 0 = none)', type: 'float', min: 0, max: 20, step: 0.25, default: 0 },
+      { key: 'outlineColor', label: 'Outline color', type: 'select', options: ['background', 'first ink', 'last ink'], default: 'background' },
+      seedParam,
     ],
     render(W, H, p, pal) {
+      const rnd = VM.rng(p.seed);
       const vertical = p.direction === 'vertical';
       // Work in (along, across) coordinates, then swap for vertical bands.
       const L = vertical ? H : W, A = vertical ? W : H;
-      const f = WAVE_SHAPES[p.shape];
-      const bandH = A / p.bands;
-      const amp = (bandH * p.amp) / 200;
-      const samples = Math.max(64, 48 * p.freq);
-      // Boundary k sits at k*bandH and is shifted by k*drift/bands of a wave, so boundary
-      // `bands` equals boundary 0 moved down one tile: the seam matches.
+      const N = p.bands;
+      // Edge positions across the tile; uneven heights come from seeded random weights.
+      const weights = Array.from({ length: N }, () => Math.max(0.1, 1 + (p.vary / 100) * (rnd() * 2 - 1)));
+      const total = weights.reduce((a, b) => a + b, 0);
+      const base = [0];
+      weights.forEach((w) => base.push(base.at(-1) + (w / total) * A));
+      const avgBand = A / N;
+      const amp0 = (avgBand * p.amp) / 200;
+      const shape = WAVE_SHAPES[p.shape];
+      const rows = p.shape === 'noise' ? VM.noise(p.seed + 11, L, A, Math.max(1, p.freq), 3) : null;
+      const wob = p.wobble > 0 ? VM.noise(p.seed + 23, L, A, Math.max(2, p.freq * 2), 2) : null;
+
+      // Edge k's offset from its base line at position u (0..1 along the tile). Every
+      // per-edge setting uses k mod N, so edge N matches edge 0 one tile over: seamless.
+      const edge = (k) => {
+        const kk = VM.mod(k, N);
+        const off = (kk * p.drift) / N;
+        const sign = p.mirror && kk % 2 ? -1 : 1;
+        const swell = p.swell ? 1 - (p.swellDepth / 100) * (0.5 - 0.5 * Math.cos((TAU * p.swell * kk) / N)) : 1;
+        const a = amp0 * swell;
+        const yRow = base[kk];
+        return (u) => {
+          let v = rows ? rows(u * L, yRow) : shape(u * p.freq + off, p);
+          if (p.harmonic) v += (p.harmonicAmp / 100) * Math.sin(TAU * (u * p.freq * p.harmonic + off * p.harmonic));
+          let y = sign * a * v;
+          if (wob) y += (p.wobble / 100) * avgBand * 0.5 * wob(u * L, yRow);
+          return y;
+        };
+      };
+
+      // Points along edge k. Jumps (steps, sawtooth) are located exactly by bisection and
+      // drawn as true vertical edges; zigzag corners are always sampled; straight runs are
+      // merged afterwards so the output stays small.
       const curve = (k) => {
-        const off = (k * p.drift) / p.bands;
-        let us; // positions along the tile, 0..1
-        if (p.shape === 'zigzag') {
-          // Sample exactly at the zigzag corners (every quarter wave) so points stay sharp.
-          us = [0, 1];
+        const g = edge(k), y0 = base[k];
+        const per = Math.max(1, p.freq) * Math.max(1, p.harmonic || 1);
+        const M = Math.min(4000, Math.max(64, 48 * per));
+        const us = new Set(Array.from({ length: M + 1 }, (_, s) => s / M));
+        if (p.shape === 'zigzag' && !p.harmonic && !wob) {
+          const off = (VM.mod(k, N) * p.drift) / N;
           for (let m = Math.ceil(4 * off); m <= Math.floor(4 * (p.freq + off)); m++) {
             const u = (m / 4 - off) / p.freq;
-            if (u > 0 && u < 1) us.push(u);
+            if (u > 0 && u < 1) us.add(u);
           }
-          us.sort((a, b) => a - b);
-        } else {
-          us = Array.from({ length: samples + 1 }, (_, s) => s / samples);
         }
-        return us.map((u) => [u * L, k * bandH + amp * f(u * p.freq + off)]);
+        const sorted = [...us].sort((a, b) => a - b);
+        const pts = [];
+        const jumpTol = amp0 * 0.25 + 1e-9;
+        for (let i = 0; i < sorted.length; i++) {
+          const u = sorted[i];
+          if (i > 0 && JUMPY.has(p.shape)) {
+            let lo = sorted[i - 1], hi = u;
+            if (Math.abs(g(hi) - g(lo)) > jumpTol) {
+              for (let it = 0; it < 40; it++) { const mid = (lo + hi) / 2; if (Math.abs(g(mid) - g(lo)) > jumpTol) hi = mid; else lo = mid; }
+              pts.push([lo * L, y0 + g(lo)], [hi * L, y0 + g(hi)]);
+            }
+          }
+          pts.push([u * L, y0 + g(u)]);
+        }
+        return simplify(pts);
       };
+
       const tf = vertical ? ([x, y]) => [y, x] : (pt) => pt;
+      const edges = Array.from({ length: N + 1 }, (_, k) => curve(k));
       let out = '';
-      for (let k = 0; k < p.bands; k++) {
-        const pts = [...curve(k), ...curve(k + 1).reverse()].map(tf);
+      for (let k = 0; k < N; k++) {
+        const pts = [...edges[k], ...edges[k + 1].slice().reverse()].map(tf);
         out += VM.wrap(W, H, VM.boxOf(pts), `<path d="${VM.polyPath(pts, true)}" fill="${color(pal, k)}"/>`);
+      }
+      if (p.outline > 0) {
+        const oc = p.outlineColor === 'first ink' ? pal.colors[0] : p.outlineColor === 'last ink' ? pal.colors.at(-1) : pal.bg;
+        for (let k = 0; k < N; k++) {
+          const pts = edges[k].map(tf);
+          out += VM.wrap(W, H, VM.boxOf(pts, p.outline), `<path d="${VM.polyPath(pts)}" fill="none" stroke="${oc}" stroke-width="${VM.n(p.outline)}" stroke-linejoin="round"/>`);
+        }
       }
       return out;
     },
   };
+
+  // Drop points that sit on a straight line between their neighbors.
+  function simplify(pts) {
+    if (pts.length < 3) return pts;
+    const out = [pts[0]];
+    for (let i = 1; i < pts.length - 1; i++) {
+      const [ax, ay] = out.at(-1), [bx, by] = pts[i], [cx, cy] = pts[i + 1];
+      const cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+      const len = Math.hypot(cx - ax, cy - ay) || 1;
+      if (Math.abs(cross) / len > 1e-3) out.push(pts[i]);
+    }
+    out.push(pts.at(-1));
+    return out;
+  }
 
   // ---------------------------------------------------------------- Scattered motifs
   const MOTIFS = {
