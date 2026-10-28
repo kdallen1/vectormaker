@@ -9,6 +9,14 @@
     'Pearl snap': { bg: '#fbf7ef', colors: ['#2b2420', '#b9a68a'] },
     'Bandana': { bg: '#9e1b1b', colors: ['#ffffff', '#111111'] },
     'Indigo': { bg: '#18233f', colors: ['#e8e1d0', '#6f86b8'] },
+    'Camo: woodland': { bg: '#a39a6e', colors: ['#4f5d33', '#6b4a2b', '#1f1f1a'] },
+    'Camo: tiger stripe': { bg: '#8c8a5c', colors: ['#4b5530', '#5e4630', '#1d1d18'] },
+    'Camo: desert': { bg: '#d9c7a5', colors: ['#b79c74', '#8c6f4c', '#f4ede0', '#3d3128'] },
+    'Camo: flecktarn': { bg: '#8a8c66', colors: ['#5f6b45', '#2f3a24', '#6b4b33', '#1d1d18'] },
+    'Camo: urban': { bg: '#c9c9c4', colors: ['#8e8e8a', '#5a5b58', '#232323'] },
+    'Camo: snow': { bg: '#f4f5f4', colors: ['#d3d8dc', '#9aa3aa', '#5b636a'] },
+    'Camo: blaze orange': { bg: '#ff6a13', colors: ['#c9480a', '#5a2a0e', '#1b1b1b'] },
+    'Camo: pink': { bg: '#f7c6d9', colors: ['#e48bb0', '#b04e7e', '#5e2a45'] },
   };
 
   const defaultState = () => ({
@@ -33,6 +41,10 @@
       palette: structuredClone(PALETTES['Rodeo']),
     },
     view: { repeat: 3, outline: true, zoom: 1 },
+    // Imported SVG art used by pattern stripes, keyed by id. Kept out of undo history.
+    assets: {},
+    // Set while a pattern stripe is open in Generative mode: { index, gen, canvas }.
+    editSession: null,
   });
 
   // Fill in anything missing from an older or hand-edited project file.
@@ -45,6 +57,7 @@
     out.gen.palette = { ...d.gen.palette, ...(s.gen?.palette || {}) };
     if (!VM.GENERATORS[out.gen.type]) out.gen.type = d.gen.type;
     if (!VM.UNITS.includes(out.unit)) out.unit = d.unit;
+    out.assets = s.assets || {};
     return out;
   }
 
@@ -93,13 +106,20 @@
   }
   function saveSoon() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(state)), 300);
+    saveTimer = setTimeout(() => {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+      catch {
+        // Browser storage is ~5 MB; big imported SVGs can exceed it.
+        if (!saveSoon.warned) { saveSoon.warned = true; alert('This project is too big for the browser\'s autosave. Use "Save project" to keep a copy.'); }
+      }
+    }, 300);
   }
 
   // ------------------------------------------------------------------ undo / redo
   // History holds snapshots of the design (everything except view settings like zoom).
   const HISTORY_LIMIT = 200;
-  const snapshot = () => JSON.stringify({ ...state, view: undefined });
+  // Imported art (assets) is never edited, only added, so it stays out of the snapshots.
+  const snapshot = () => JSON.stringify({ ...state, view: undefined, assets: undefined });
   let committed = snapshot();
   const undoStack = [], redoStack = [];
   let commitTimer;
@@ -123,7 +143,7 @@
     if (!from.length) return;
     to.push(committed);
     committed = from.pop();
-    state = normalize({ ...JSON.parse(committed), view: state.view });
+    state = normalize({ ...JSON.parse(committed), view: state.view, assets: state.assets });
     renderPanel();
     cancelAnimationFrame(frame);
     renderPreview();
@@ -153,7 +173,7 @@
     if (state.mode === 'stripes') {
       const total = VM.stripesTotalPx(state.stripes.items);
       const W = state.stripes.fitWidth ? total : VM.toPx(state.canvas.width, state.unit);
-      return { W, H, bg: state.stripes.bg, body: VM.renderStripes(state.stripes.items, H) };
+      return { W, H, bg: state.stripes.bg, body: VM.renderStripes(state.stripes.items, H, state.assets) };
     }
     const W = VM.toPx(state.canvas.width, state.unit);
     const gen = VM.GENERATORS[state.gen.type];
@@ -166,7 +186,7 @@
     const u = state.unit;
     const dim = (px) => VM.n(VM.fromPx(px, u)) + u;
     return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${dim(W)}" height="${dim(H)}" viewBox="0 0 ${VM.n(W)} ${VM.n(H)}">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${dim(W)}" height="${dim(H)}" viewBox="0 0 ${VM.n(W)} ${VM.n(H)}">
 <title>${VM.esc(state.name)}</title>
 <defs><clipPath id="tile"><rect width="${VM.n(W)}" height="${VM.n(H)}"/></clipPath></defs>
 <g clip-path="url(#tile)">
@@ -194,6 +214,19 @@ ${body}
 
     const n = state.view.repeat;
     const content = `<rect width="${VM.n(W)}" height="${VM.n(H)}" fill="${VM.esc(tile.bg)}"/>${tile.body}`;
+    box.classList.toggle('infinite', n === 0);
+    if (n === 0) {
+      // Infinite: the pattern fills the whole view; panning just moves the viewBox.
+      // The outline marks a single tile (at the origin), which pans along with the pattern.
+      const outline = state.view.outline
+        ? `<rect class="pv-outline" width="${VM.n(W)}" height="${VM.n(H)}" fill="none" stroke="#ff2d7a"/>`
+        : '';
+      box.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg"><defs><pattern id="pv-pat" width="${VM.n(W)}" height="${VM.n(H)}" patternUnits="userSpaceOnUse">${content}</pattern></defs>` +
+        `<rect class="pv-cover" fill="url(#pv-pat)"/>${outline}</svg>`;
+      box.scrollTop = box.scrollLeft = 0;
+      updateInfiniteView();
+      return;
+    }
     let inner;
     if (n === 1) {
       inner = `<defs><clipPath id="pv-clip"><rect width="${VM.n(W)}" height="${VM.n(H)}"/></clipPath></defs><g clip-path="url(#pv-clip)">${content}</g>`;
@@ -209,8 +242,67 @@ ${body}
     fitPreview();
   }
 
+  // ---- infinite preview
+  // Top-left of the view in tile coordinates. `centered` is cleared to re-center the
+  // outlined tile the next time the infinite view is drawn.
+  const pan = { x: 0, y: 0, centered: false };
+  const isInfinite = () => state.view.repeat === 0 && lastTile && lastTile.W > 0 && lastTile.H > 0;
+  // Screen px per tile px. At 100% zoom about three tiles span the shorter side of the view.
+  function infiniteScale() {
+    const box = $('#preview');
+    return state.view.zoom * Math.min(box.clientWidth / (3 * lastTile.W), box.clientHeight / (3 * lastTile.H));
+  }
+  function updateInfiniteView() {
+    const box = $('#preview');
+    const svg = box.querySelector('svg');
+    $('#zoom-fit').textContent = Math.round(state.view.zoom * 100) + '%';
+    if (!svg || !isInfinite()) return;
+    const s = infiniteScale();
+    if (!pan.centered) {
+      pan.x = lastTile.W / 2 - box.clientWidth / s / 2;
+      pan.y = lastTile.H / 2 - box.clientHeight / s / 2;
+      pan.centered = true;
+    }
+    const vb = [pan.x, pan.y, box.clientWidth / s, box.clientHeight / s].map(VM.n);
+    svg.setAttribute('viewBox', vb.join(' '));
+    for (const r of svg.querySelectorAll('.pv-cover')) {
+      r.setAttribute('x', vb[0]); r.setAttribute('y', vb[1]); r.setAttribute('width', vb[2]); r.setAttribute('height', vb[3]);
+    }
+    // Keep the outline's line weight and dashes constant on screen at any zoom.
+    const line = svg.querySelector('.pv-outline');
+    if (line) {
+      line.setAttribute('stroke-width', VM.n(2 / s));
+      line.setAttribute('stroke-dasharray', `${VM.n(8 / s)} ${VM.n(6 / s)}`);
+    }
+  }
+
+  // Drag to pan (infinite mode only).
+  $('#preview').addEventListener('pointerdown', (e) => {
+    if (!isInfinite() || e.button !== 0) return;
+    e.preventDefault();
+    const box = $('#preview');
+    let lx = e.clientX, ly = e.clientY;
+    box.classList.add('panning');
+    const move = (ev) => {
+      const s = infiniteScale();
+      pan.x -= (ev.clientX - lx) / s; pan.y -= (ev.clientY - ly) / s;
+      lx = ev.clientX; ly = ev.clientY;
+      updateInfiniteView();
+    };
+    const up = () => {
+      box.classList.remove('panning');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  });
+
   // Size the preview: zoom 1 fits the window, other values scale from there.
   function fitPreview() {
+    if (isInfinite()) return updateInfiniteView();
     const box = $('#preview');
     const svg = box.querySelector('svg');
     $('#zoom-fit').textContent = Math.round(state.view.zoom * 100) + '%';
@@ -230,6 +322,19 @@ ${body}
     const svg = box.querySelector('svg');
     z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
     if (!svg) { state.view.zoom = z; fitPreview(); return; }
+    if (isInfinite()) {
+      // Keep the tile point under the anchor fixed while the scale changes.
+      const rect = box.getBoundingClientRect();
+      const ax = (clientX ?? rect.left + rect.width / 2) - rect.left, ay = (clientY ?? rect.top + rect.height / 2) - rect.top;
+      const s0 = infiniteScale();
+      const wx = pan.x + ax / s0, wy = pan.y + ay / s0;
+      state.view.zoom = z;
+      const s1 = infiniteScale();
+      pan.x = wx - ax / s1; pan.y = wy - ay / s1;
+      updateInfiniteView();
+      saveSoon();
+      return;
+    }
     const rect = box.getBoundingClientRect();
     const svgRect = svg.getBoundingClientRect();
     const cx = clientX ?? rect.left + rect.width / 2;
@@ -249,10 +354,17 @@ ${body}
   $('#zoom-out').addEventListener('click', () => zoomBy(1 / 1.25));
   $('#zoom-fit').addEventListener('click', () => setZoom(1));
   // ⌘/Ctrl + scroll wheel, and trackpad pinch (which arrives as ctrl + wheel).
+  // In infinite mode, plain scrolling (two-finger trackpad swipe) pans.
   $('#preview').addEventListener('wheel', (e) => {
-    if (!(e.ctrlKey || e.metaKey)) return;
-    e.preventDefault();
-    zoomBy(Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      zoomBy(Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+    } else if (isInfinite()) {
+      e.preventDefault();
+      const s = infiniteScale();
+      pan.x += e.deltaX / s; pan.y += e.deltaY / s;
+      updateInfiniteView();
+    }
   }, { passive: false });
   document.addEventListener('keydown', (e) => {
     if (e.target.closest('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -263,14 +375,16 @@ ${body}
 
   // Clicking a stripe in the single-tile preview highlights its row in the inventory.
   $('#preview').addEventListener('click', (e) => {
-    const i = e.target.getAttribute?.('data-stripe');
-    if (i == null) return;
+    const i = e.target.closest?.('[data-stripe]')?.getAttribute('data-stripe');
+    if (i != null) flashStripe(i);
+  });
+  function flashStripe(i) {
     const row = document.querySelector(`.stripe[data-index="${i}"]`);
     if (!row) return;
     row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     row.classList.add('flash');
     setTimeout(() => row.classList.remove('flash'), 900);
-  });
+  }
 
   // ------------------------------------------------------------------ panel
   function canvasSection({ widthEditable }) {
@@ -301,10 +415,10 @@ ${body}
     const s = state.stripes;
     const items = s.items;
     const list = h('ul', { class: 'stripe-list' }, items.map((st, i) =>
-      h('li', { class: 'stripe', 'data-index': i },
+      h('li', { class: 'stripe' + (st.kind === 'pattern' ? ' pattern' : ''), 'data-index': i },
         h('span', { class: 'grip', title: 'Drag to reorder' }, '⠿'),
         h('span', { class: 'idx' }, String(i + 1)),
-        colorInput(st.color, (c) => { st.color = c; changed(); }),
+        st.kind === 'pattern' ? patternBadge(st) : colorInput(st.color, (c) => { st.color = c; changed(); }),
         h('input', { type: 'number', min: 0, step: 'any', value: st.width, title: 'Stripe width',
           oninput: (e) => { st.width = num(e.target.value); changed(); updateTotal(); } }),
         unitSelect(st.unit, (u) => {
@@ -315,9 +429,33 @@ ${body}
           changed({ panel: true });
         }),
         h('span', { class: 'spacer' }),
-        h('button', { class: 'icon', title: 'Duplicate (insert copy right after this stripe)', onclick: () => { items.splice(i + 1, 0, { ...st }); changed({ panel: true }); } }, '⧉'),
-        h('button', { class: 'icon', title: 'Copy to end (append a copy after the last stripe)', onclick: () => { items.push({ ...st }); changed({ panel: true }); } }, '⇥'),
+        st.kind === 'pattern' ? null : h('button', { class: 'icon' + (st.gradient ? ' on' : ''), title: st.gradient ? 'Make solid' : 'Make gradient', onclick: () => {
+          st.gradient = !st.gradient;
+          if (st.gradient && !st.color2) {
+            // Start with a neighbor's color (or white) so the fade is visible right away.
+            const next = items[i + 1] || items[i - 1];
+            st.color2 = next && next.color !== st.color ? next.color : '#ffffff';
+          }
+          // Fade & back repeats seamlessly top to bottom, so it's the safer default.
+          st.shape = st.shape || 'peak';
+          st.steps = st.steps ?? 0;
+          changed({ panel: true });
+        } }, '◐'),
+        h('button', { class: 'icon', title: 'Duplicate (insert copy right after this stripe)', onclick: () => { items.splice(i + 1, 0, structuredClone(st)); changed({ panel: true }); } }, '⧉'),
+        h('button', { class: 'icon', title: 'Copy to end (append a copy after the last stripe)', onclick: () => { items.push(structuredClone(st)); changed({ panel: true }); } }, '⇥'),
         h('button', { class: 'icon', title: 'Remove', onclick: () => { items.splice(i, 1); changed({ panel: true }); } }, '✕'),
+        st.kind === 'pattern' ? patternLine(st, i) : null,
+        st.kind !== 'pattern' && st.gradient ? h('div', { class: 'gradline' },
+          h('span', { class: 'arrow', title: 'Color the stripe fades to, top to bottom' }, '↓ to'),
+          colorInput(st.color2, (c) => { st.color2 = c; changed(); }),
+          h('select', { title: 'Gradient shape', onchange: (e) => { st.shape = e.target.value; changed(); } },
+            Object.entries(VM.GRADIENT_SHAPES).map(([k, label]) => h('option', { value: k, selected: k === st.shape }, label))),
+          h('label', { title: '0 = smooth gradient. Any other number splits the stripe into that many solid horizontal bands.' }, 'steps ',
+            h('input', { type: 'number', min: 0, max: 200, step: 1, value: st.steps || 0, class: 'steps',
+              oninput: (e) => { st.steps = Math.max(0, Math.round(num(e.target.value))); changed(); } })),
+          h('button', { class: 'icon', title: 'Swap start and end colors', onclick: () => { [st.color, st.color2] = [st.color2, st.color]; changed({ panel: true }); } }, '⇄'),
+        ) : null,
+        st.kind !== 'pattern' && st.gradient ? shiftControl(st) : null,
       )));
 
     enableStripeDrag(list, items);
@@ -331,7 +469,7 @@ ${body}
 
     const addStripe = () => {
       const last = items[items.length - 1];
-      items.push(last ? { ...last } : { color: '#1f3557', width: 0.25, unit: state.unit === 'px' ? 'in' : state.unit });
+      items.push(last && last.kind !== 'pattern' ? { ...last } : { color: '#1f3557', width: 0.25, unit: state.unit === 'px' ? 'in' : state.unit });
       changed({ panel: true });
       $('#panel').querySelector('.stripe:last-child input.hex')?.focus();
     };
@@ -349,14 +487,162 @@ ${body}
       total,
       h('div', { class: 'row' },
         h('button', { class: 'primary', onclick: addStripe }, '+ Add stripe'),
+        h('button', { title: 'Add a stripe filled with the pattern currently set up in Generative mode', onclick: () => addPatternStripe(currentGenPattern()) }, '+ Pattern stripe'),
+        h('button', { title: 'Import a saved project (.json) or an SVG file as a pattern stripe', onclick: () => $('#file-import').click() }, 'Import…'),
+      ),
+      h('div', { class: 'row' },
         h('button', { title: 'Append the stripes in reverse order for a symmetric repeat', onclick: () => {
-          items.push(...items.slice(0, -1).reverse().map((x) => ({ ...x })));
+          items.push(...items.slice(0, -1).reverse().map((x) => structuredClone(x)));
           changed({ panel: true });
         } }, 'Mirror'),
         h('button', { onclick: () => { if (confirm('Remove all stripes?')) { items.length = 0; changed({ panel: true }); } } }, 'Clear'),
       ),
-      h('p', { class: 'hint' }, 'Drag rows by the ⠿ grip to reorder. Mirror appends the stripes in reverse order, skipping the last one so the center stripe is not doubled. Click a stripe in the preview to find it in this list.'),
+      h('p', { class: 'hint' }, 'Drag rows by the ⠿ grip to reorder. ◐ makes a stripe fade top to bottom. "Fade & back" repeats seamlessly when tiles stack; a one-way "Fade ↓" shows a line where they meet. Mirror appends the stripes in reverse order, skipping the last one so the center stripe is not doubled. Click a stripe in the preview to find it in this list. Pattern stripes repeat their tile down the stripe; "+ Pattern stripe" uses whatever is set up in Generative mode, and Import… takes a saved project or any SVG.'),
     ];
+  }
+
+  // ---- pattern stripes
+  const genName = (p) => (p.source === 'svg' ? state.assets[p.asset]?.name || 'Imported SVG' : VM.GENERATORS[p.type]?.name || p.type);
+
+  // The pattern set up in Generative mode, as a stripe fill.
+  function currentGenPattern() {
+    const W = VM.toPx(state.canvas.width, state.unit), H = VM.toPx(state.canvas.height, state.unit);
+    return { source: 'gen', type: state.gen.type, params: structuredClone(state.gen.params[state.gen.type]),
+      palette: structuredClone(state.gen.palette), aspect: W > 0 && H > 0 ? W / H : 1, height: H > 0 ? H : 96 };
+  }
+
+  function addPatternStripe(pattern) {
+    const items = state.stripes.items;
+    const H = VM.toPx(state.canvas.height, state.unit);
+    const unit = state.unit === 'px' ? 'in' : state.unit;
+    items.push({ kind: 'pattern', pattern, repeats: Math.max(1, Math.round(H / pattern.height)), width: unit === 'cm' ? 2.5 : 1, unit, color: '#000000' });
+    state.mode = 'stripes';
+    changed({ panel: true });
+    flashStripe(items.length - 1);
+  }
+
+  // Thumbnail + name shown in place of the color swatch.
+  function patternBadge(st) {
+    const H = VM.toPx(state.canvas.height, state.unit);
+    const k = VM.patternRepeats(st, H);
+    const th = H / k, tw = th * (st.pattern.aspect || 1);
+    const thumb = h('span', { class: 'thumb' });
+    thumb.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${VM.n(tw)} ${VM.n(th)}" preserveAspectRatio="xMidYMid slice">${VM.patternTile(st.pattern, state.assets, tw, th)}</svg>`;
+    return [thumb, h('span', { class: 'pname', title: genName(st.pattern) }, genName(st.pattern))];
+  }
+
+  // Second line of a pattern stripe: repeats, tile size, reseed, edit.
+  function patternLine(st, i) {
+    const H = VM.toPx(state.canvas.height, state.unit);
+    const k = VM.patternRepeats(st, H);
+    const th = H / k, tw = th * (st.pattern.aspect || 1);
+    const gen = st.pattern.source === 'gen' ? VM.GENERATORS[st.pattern.type] : null;
+    const hasSeed = gen?.params.some((d) => d.key === 'seed');
+    return h('div', { class: 'gradline' },
+      h('label', { title: 'How many times the pattern tile repeats down the stripe. More repeats = smaller pattern.' }, 'repeats down ',
+        h('input', { type: 'number', min: 1, max: 100, step: 1, value: k, class: 'steps',
+          onchange: (e) => { st.repeats = Math.max(1, Math.round(num(e.target.value)) || 1); changed({ panel: true }); } })),
+      h('span', { class: 'arrow', title: 'Size of one pattern tile' }, `tile ${VM.fmtUnit(tw, state.unit)} × ${VM.fmtUnit(th, state.unit)}`),
+      h('span', { class: 'spacer' }),
+      hasSeed ? h('button', { class: 'icon', title: 'New random seed', onclick: () => { st.pattern.params.seed = VM.randomSeed(); changed({ panel: true }); } }, '🎲') : null,
+      gen ? h('button', { title: 'Open this pattern in Generative mode to change its settings', onclick: () => editPatternStripe(i) }, 'Edit') : null,
+    );
+  }
+
+  // Open a pattern stripe in Generative mode. The canvas becomes the stripe's tile size;
+  // everything Generative mode had before is stashed and restored afterwards.
+  function editPatternStripe(i) {
+    const st = state.stripes.items[i], p = st.pattern;
+    const H = VM.toPx(state.canvas.height, state.unit);
+    const k = VM.patternRepeats(st, H);
+    const round = (v) => (state.unit === 'px' ? Math.round(v * 100) / 100 : Math.round(v * 10000) / 10000);
+    state.editSession = { index: i, gen: structuredClone(state.gen), canvas: { ...state.canvas } };
+    state.gen.type = p.type;
+    state.gen.params[p.type] = { ...VM.defaultParams(VM.GENERATORS[p.type]), ...structuredClone(p.params) };
+    state.gen.palette = structuredClone(p.palette);
+    state.canvas.height = round(VM.fromPx(H / k, state.unit));
+    state.canvas.width = round(VM.fromPx((H / k) * (p.aspect || 1), state.unit));
+    state.mode = 'generative';
+    changed({ panel: true });
+  }
+
+  function finishPatternEdit(save) {
+    const ses = state.editSession;
+    if (!ses) return;
+    const pattern = currentGenPattern();
+    state.gen = ses.gen;
+    state.canvas = ses.canvas;
+    const st = state.stripes.items[ses.index];
+    if (save && st?.kind === 'pattern') {
+      st.pattern = pattern;
+      st.repeats = Math.max(1, Math.round(VM.toPx(state.canvas.height, state.unit) / pattern.height));
+    }
+    state.editSession = null;
+    state.mode = 'stripes';
+    changed({ panel: true });
+    flashStripe(ses.index);
+  }
+
+  // Import a saved project (its Generative pattern) or an SVG file as a pattern stripe.
+  async function importPatternFile(file) {
+    const text = await file.text();
+    if (/\.svg$/i.test(file.name) || /^\s*(<\?xml[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i.test(text)) {
+      const art = parseSvgArt(text, file.name.replace(/\.svg$/i, ''));
+      const id = 'a' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+      state.assets[id] = { name: art.name, viewBox: art.viewBox, markup: art.markup };
+      addPatternStripe({ source: 'svg', asset: id, aspect: art.viewBox[2] / art.viewBox[3], height: art.heightPx });
+    } else {
+      const proj = normalize(JSON.parse(text));
+      const W = VM.toPx(proj.canvas.width, proj.unit), H = VM.toPx(proj.canvas.height, proj.unit);
+      if (!(W > 0 && H > 0)) throw new Error('that project has an empty canvas');
+      addPatternStripe({ source: 'gen', type: proj.gen.type, params: proj.gen.params[proj.gen.type], palette: proj.gen.palette, aspect: W / H, height: H });
+    }
+  }
+
+  // Pull the drawing out of an SVG file: its viewBox, physical height, and inner markup with
+  // ids prefixed (so several imports can't collide) and anything scriptable removed.
+  function parseSvgArt(text, name) {
+    const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+    const root = doc.documentElement;
+    if (root.nodeName !== 'svg' || doc.querySelector('parsererror')) throw new Error("that file isn't a valid SVG");
+    const len = (v) => {
+      const m = /^\s*([\d.]+)\s*(px|in|cm|mm|pt)?\s*$/.exec(v || '');
+      if (!m) return 0;
+      return parseFloat(m[1]) * ({ px: 1, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, pt: 96 / 72 }[m[2] || 'px']);
+    };
+    let vb = (root.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+    if (vb.length !== 4 || vb.some((v) => !Number.isFinite(v)) || vb[2] <= 0 || vb[3] <= 0) {
+      const w = len(root.getAttribute('width')), hh = len(root.getAttribute('height'));
+      if (!(w > 0 && hh > 0)) throw new Error('the SVG has no size (viewBox or width/height)');
+      vb = [0, 0, w, hh];
+    }
+    const heightPx = len(root.getAttribute('height')) || vb[3];
+    root.querySelectorAll('script, foreignObject').forEach((el) => el.remove());
+    const prefix = 'imp' + Math.floor(Math.random() * 1e6).toString(36) + '-';
+    const all = [...root.querySelectorAll('*')];
+    const ids = new Set(all.map((el) => el.id).filter(Boolean));
+    for (const el of all) {
+      for (const attr of [...el.attributes]) {
+        if (/^on/i.test(attr.name) || /^\s*javascript:/i.test(attr.value)) { el.removeAttribute(attr.name); continue; }
+        if (attr.name === 'id') { el.setAttribute('id', prefix + attr.value); continue; }
+        let v = attr.value.replace(/url\(\s*#([^)\s]+)\s*\)/g, (m, id) => (ids.has(id) ? `url(#${prefix}${id})` : m));
+        if (/href$/.test(attr.name) && v.startsWith('#') && ids.has(v.slice(1))) v = '#' + prefix + v.slice(1);
+        if (v !== attr.value) el.setAttributeNS(attr.namespaceURI, attr.name, v);
+      }
+    }
+    const ser = new XMLSerializer();
+    const markup = [...root.childNodes].filter((nd) => nd.nodeType === 1 && nd.nodeName !== 'title').map((nd) => ser.serializeToString(nd)).join('');
+    return { name, viewBox: vb, heightPx, markup };
+  }
+
+  // Slider + number for sliding a stripe's fade up or down (percent of tile height, wrapping).
+  function shiftControl(st) {
+    const value = st.shift || 0;
+    const range = h('input', { type: 'range', min: 0, max: 100, step: 0.5, value: VM.mod(value, 100), title: 'Slide the fade down (wraps around, so it still tiles)' });
+    const box = h('input', { type: 'number', step: 1, value, class: 'steps', title: 'Shift in % of tile height. Any value works; it wraps every 100%.' });
+    range.addEventListener('input', () => { box.value = range.value; st.shift = num(range.value); changed(); });
+    box.addEventListener('input', () => { st.shift = num(box.value); range.value = VM.mod(st.shift, 100); changed(); });
+    return h('div', { class: 'gradline shiftline' }, h('span', { class: 'arrow' }, '↕ shift'), range, box, h('span', { class: 'arrow' }, '%'));
   }
 
   // Drag a stripe row (by its grip or any non-control part) to reorder. Other rows slide
@@ -374,7 +660,8 @@ ${body}
       // Row geometry in list coordinates, captured before anything moves.
       const base = listTop();
       const geo = rows.map((r) => { const b = r.getBoundingClientRect(); return { top: b.top - base, mid: b.top - base + b.height / 2 }; });
-      const pitch = rows.length > 1 ? geo[1].top - geo[0].top : row.offsetHeight;
+      // Rows can differ in height (gradient rows are taller); others move by the dragged row's size.
+      const pitch = row.getBoundingClientRect().height + parseFloat(getComputedStyle(row).marginBottom || 0);
       const startY = e.clientY - base;
       let to = from;
 
@@ -422,15 +709,24 @@ ${body}
     });
   }
 
+  // Whether a param applies right now (params can declare `when: { otherKey: [values] }`).
+  const paramVisible = (def, params) => !def.when || Object.entries(def.when).every(([k, vals]) => vals.includes(params[k]));
+
   function paramField(def, params) {
     const set = (v) => { params[def.key] = v; changed(); };
     const label = h('span', { class: 'label' }, def.label);
     if (def.type === 'select') {
+      // Choices can load preset values for other params and change which params are shown,
+      // so they re-render the panel.
       return h('div', { class: 'field' }, label,
-        h('select', { onchange: (e) => set(e.target.value) }, def.options.map((o) => h('option', { value: o, selected: o === params[def.key] }, o))));
+        h('select', { onchange: (e) => {
+          params[def.key] = e.target.value;
+          if (def.presets?.[e.target.value]) Object.assign(params, def.presets[e.target.value]);
+          changed({ panel: true });
+        } }, def.options.map((o) => h('option', { value: o, selected: o === params[def.key] }, o))));
     }
     if (def.type === 'bool') {
-      return h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!params[def.key], onchange: (e) => set(e.target.checked) }), def.label);
+      return h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!params[def.key], onchange: (e) => { params[def.key] = e.target.checked; changed({ panel: true }); } }), def.label);
     }
     if (def.type === 'seed') {
       const box = h('input', { type: 'number', step: 1, value: params[def.key], oninput: (e) => set(Math.round(num(e.target.value))) });
@@ -459,14 +755,22 @@ ${body}
         pal.colors.length > 1 ? h('button', { class: 'remove', title: 'Remove color', onclick: () => { pal.colors.splice(i, 1); changed({ panel: true }); } }, '✕') : null)),
       h('button', { class: 'icon', title: 'Add color', onclick: () => { pal.colors.push(pal.colors[pal.colors.length - 1] || '#000000'); changed({ panel: true }); } }, '+'));
 
+    const ses = state.editSession;
     return [
+      ses ? h('div', { class: 'banner' },
+        h('div', {}, h('strong', {}, `Editing the pattern in stripe ${ses.index + 1}.`), ' The canvas is set to that stripe\'s tile size.'),
+        h('div', { class: 'row' },
+          h('button', { class: 'primary', onclick: () => finishPatternEdit(true) }, 'Save to stripe'),
+          h('button', { onclick: () => finishPatternEdit(false) }, 'Cancel'))) : null,
       ...canvasSection({ widthEditable: true }),
       h('h3', {}, 'Pattern'),
       h('select', { onchange: (e) => { g.type = e.target.value; changed({ panel: true }); } },
         Object.entries(VM.GENERATORS).map(([k, x]) => h('option', { value: k, selected: k === g.type }, x.name))),
       h('p', { class: 'blurb' }, gen.blurb),
-      gen.params.map((def) => paramField(def, params)),
-      h('div', { class: 'row' }, h('button', { onclick: () => { g.params[g.type] = VM.defaultParams(gen); changed({ panel: true }); } }, 'Reset pattern settings')),
+      gen.params.filter((def) => paramVisible(def, params)).map((def) => paramField(def, params)),
+      h('div', { class: 'row' },
+        h('button', { onclick: () => { g.params[g.type] = VM.defaultParams(gen); changed({ panel: true }); } }, 'Reset pattern settings'),
+        ses ? null : h('button', { title: 'Add this pattern to Stripes mode as a pattern stripe', onclick: () => addPatternStripe(currentGenPattern()) }, 'Use as stripe →')),
 
       h('h3', {}, 'Colors'),
       h('div', { class: 'row' }, h('span', {}, 'Background'), colorInput(pal.bg, (c) => { pal.bg = c; changed(); })),
@@ -502,9 +806,13 @@ ${body}
   }
 
   document.querySelectorAll('.tabs button').forEach((b) =>
-    b.addEventListener('click', () => { state.mode = b.dataset.mode; changed({ panel: true }); }));
+    b.addEventListener('click', () => {
+      if (state.editSession && b.dataset.mode === 'stripes') return finishPatternEdit(true);
+      state.mode = b.dataset.mode;
+      changed({ panel: true });
+    }));
   $('#project-name').addEventListener('input', (e) => { state.name = e.target.value; changed(); });
-  $('#repeat').addEventListener('change', (e) => { state.view.repeat = +e.target.value; changed(); });
+  $('#repeat').addEventListener('change', (e) => { state.view.repeat = +e.target.value; pan.centered = false; changed(); });
   $('#outline').addEventListener('change', (e) => { state.view.outline = e.target.checked; changed(); });
 
   $('#btn-export').addEventListener('click', () => {
@@ -513,7 +821,17 @@ ${body}
     const suffix = state.mode === 'stripes' ? 'stripes' : state.gen.type;
     download(`${slug()}-${suffix}.svg`, exportSvg(tile), 'image/svg+xml');
   });
-  $('#btn-save').addEventListener('click', () => download(`${slug()}.vectormaker.json`, JSON.stringify(state, null, 2), 'application/json'));
+  $('#btn-save').addEventListener('click', () => {
+    const used = new Set(state.stripes.items.map((s) => s.pattern?.asset).filter(Boolean));
+    const assets = Object.fromEntries(Object.entries(state.assets).filter(([id]) => used.has(id)));
+    download(`${slug()}.vectormaker.json`, JSON.stringify({ ...state, assets }, null, 2), 'application/json');
+  });
+  $('#file-import').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try { await importPatternFile(file); } catch (err) { alert('Could not import that file: ' + err.message); }
+  });
   $('#btn-open').addEventListener('click', () => $('#file-open').click());
   $('#file-open').addEventListener('change', async (e) => {
     const file = e.target.files[0];

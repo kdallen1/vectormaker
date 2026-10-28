@@ -419,6 +419,7 @@
   };
 
   VM.GENERATORS = { truchet, contours, rosettes, waves, scatter };
+  VM.marchingSquares = marchingSquares;
 
   VM.defaultParams = (gen) => Object.fromEntries(gen.params.map((p) => [p.key, p.default]));
 })(window.VM);

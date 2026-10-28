@@ -10,6 +10,8 @@ Open `index.html` in Chrome, Safari, or Firefox. There's nothing to install and 
 
 **Stripes.** Build an inventory of vertical stripes. Each stripe has its own color and width (px, in, or cm). **+ Add stripe** stacks a new stripe flush against the right edge. You can reorder, duplicate, or delete stripes, and **Mirror** makes a symmetric repeat. By default the canvas width equals the total stripe width, so the exported tile repeats seamlessly.
 
+Stripes can also fade top to bottom (◐), smooth or in solid steps, with a wrapping vertical shift. They can also be filled with a pattern: **Use as stripe →** in Generative mode (or **+ Pattern stripe**) adds the current generative pattern, and **Import…** takes a saved project (`.json`) or any SVG. A pattern stripe repeats its tile a whole number of times down the stripe, so it always tiles. Generated patterns can be reseeded or opened with **Edit** and saved back.
+
 **Generative.** Math-driven patterns that always tile:
 
 | Pattern | Idea |
@@ -26,6 +28,7 @@ Open `index.html` in Chrome, Safari, or Firefox. There's nothing to install and 
 | Halftone field | A tixy.land-style grid of shapes sized and rotated by a math function |
 | Recursive subdivision | Bauhaus/Mondrian-style blocks decorated with circles, half-moons, and stripes |
 | Ridgelines | Stacked noise ridges in the *Unknown Pleasures* style, each hiding the ones behind it |
+| Camouflage | Woodland, tiger stripe, digital, splinter, flecktarn, and chocolate-chip camo. Each ink color is one layer |
 
 Anything that crosses a tile edge is also drawn on the opposite edge, and the export is clipped to the tile.
 
@@ -38,5 +41,5 @@ Anything that crosses a tile edge is also drawn on the opposite edge, and the ex
 
 - `js/util.js`: units, seeded RNG, seamless-wrap helper, tileable Perlin noise
 - `js/stripes.js`: stripe rendering
-- `js/generators.js`, `js/generators-art.js`: generative patterns. Each one declares its `params` (the UI is built from these) and a `render(W, H, params, palette)` function, so a new pattern is one object.
+- `js/generators.js`, `js/generators-art.js`, `js/generators-camo.js`: generative patterns. Each one declares its `params` (the UI is built from these) and a `render(W, H, params, palette)` function, so a new pattern is one object.
 - `js/app.js`: state, panels, preview, save/open/export

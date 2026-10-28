@@ -82,14 +82,18 @@ window.VM = window.VM || {};
   // Tileable fractal Perlin noise over a W x H tile. `scale` is roughly how many noise
   // "blobs" span the shorter side; each octave doubles it. The gradient lattice wraps
   // around the tile, so f(x, y) = f(x + W, y) = f(x, y + H) exactly.
+  // `stretch` > 1 elongates features horizontally (< 1 vertically) while staying tileable.
   // Returns f(x, y) in pixel coordinates with values roughly in [-1, 1].
-  VM.noise = (seed, W, H, scale = 2, octaves = 3) => {
+  VM.noise = (seed, W, H, scale = 2, octaves = 3, stretch = 1) => {
     const rnd = VM.rng(seed * 7919 + 17);
     const S = Math.min(W, H);
     const layers = [];
     for (let o = 0; o < octaves; o++) {
       const f = scale * 2 ** o;
-      const px = Math.max(1, Math.round((f * W) / S)), py = Math.max(1, Math.round((f * H) / S));
+      // Stretch adds lattice cells across the short direction rather than removing them
+      // along the long one, so low scales don't collapse to a single cell.
+      const px = Math.max(1, Math.round(((f * W) / S) * Math.max(1, 1 / stretch)));
+      const py = Math.max(1, Math.round(((f * H) / S) * Math.max(1, stretch)));
       const g = new Float64Array(px * py * 2);
       for (let i = 0; i < px * py; i++) { const a = rnd() * Math.PI * 2; g[2 * i] = Math.cos(a); g[2 * i + 1] = Math.sin(a); }
       layers.push({ px, py, g, amp: 0.5 ** o });
