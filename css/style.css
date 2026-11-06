@@ -107,6 +107,20 @@ label.row input[type=checkbox] { flex-shrink: 0; }
 .effect { border: 1px solid var(--line); border-radius: 8px; padding: 2px 10px; margin-bottom: 6px; background: #fff; }
 .effect.on { border-color: var(--muted); }
 .effect .field { margin: 6px 0; }
+button.idx { border: none; background: none; padding: 2px 2px; width: 22px; color: var(--muted); font-size: 12px; text-align: right; cursor: pointer; border-radius: 4px; }
+button.idx:hover { background: var(--line); color: var(--ink); }
+.stripe.selected { outline: 2px solid #4a7bd0; outline-offset: -1px; }
+.stripe.selected > button.idx { background: #4a7bd0; color: #fff; }
+.stripe.group { background: #f7f0e3; }
+.stripe.group .gthumb { width: 44px; height: 26px; flex-shrink: 0; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; display: block; background: #fff; }
+.stripe.group .gthumb svg { width: 100%; height: 100%; display: block; }
+.stripe.group input.gname { width: 0; flex: 1 1 70px; min-width: 60px; font-weight: 600; }
+.stripe.group .ginfo { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.stripe.group .toggle { min-width: 22px; padding: 2px 4px; }
+.stripe-list.group-items { flex-basis: 100%; margin: 6px 0 0 14px; padding-left: 8px; border-left: 2px solid var(--line); }
+.stripe.group .gfoot { flex-basis: 100%; margin: 2px 0 2px 24px; }
+.selbar { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; padding: 6px 8px; background: #e8effb; border: 1px solid #b8cdf0; border-radius: 8px; }
+.selbar span { margin-right: auto; color: var(--ink); }
 .banner { background: #fff3d6; border: 1px solid #e8c77a; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; line-height: 1.4; }
 .stripe .shiftline input[type=range] { flex: 1; max-width: 220px; }
 .stripe .gradline label { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 4px; }

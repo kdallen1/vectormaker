@@ -4,7 +4,13 @@
 (function (VM) {
   VM.stripeWidthPx = (s) => Math.max(0, VM.toPx(Number(s.width) || 0, s.unit));
 
-  VM.stripesTotalPx = (stripes) => stripes.reduce((sum, s) => sum + VM.stripeWidthPx(s), 0);
+  // Groups ({ kind: 'group', items: [...] }) only organize the list; drawing and measuring
+  // work on the flattened sequence of stripes.
+  VM.flattenStripes = (items) => (items || []).flatMap((s) => (s.kind === 'group' ? VM.flattenStripes(s.items) : [s]));
+
+  VM.flattenGroups = (items) => (items || []).flatMap((s) => (s.kind === 'group' ? [s, ...VM.flattenGroups(s.items)] : []));
+
+  VM.stripesTotalPx = (stripes) => VM.flattenStripes(stripes).reduce((sum, s) => sum + VM.stripeWidthPx(s), 0);
 
   // Gradient shapes, top to bottom: 'fade' goes color -> color2 (a hard edge where tiles
   // stack vertically); 'peak' goes color -> color2 -> color, which repeats seamlessly.
@@ -34,42 +40,106 @@
   // Pieces for the textured looks. Each piece is [y0, y1, fill, x0, x1, dot]: a box from y0 to
   // y1 covering the fraction x0..x1 of the stripe's width. With `dot`, an ellipse sits in the
   // box instead, scaled so its area is dot² × π of the box. `tAt(y)` is the fade amount.
+  // The dither as a grid of color levels (0 .. L-1), rows top to bottom.
+  function ditherGrid(s, w, H, tAt, seedBase) {
+    const px = Math.max(0.5, Number(s.pixel) || 3);
+    const L = Math.max(2, Math.round(Number(s.levels) || 2));
+    const method = s.dither || 'bayer';
+    // Bayer repeats every 4 rows, so the row count is a multiple of 4 to wrap cleanly.
+    let rows = Math.max(1, Math.round(H / px));
+    if (method === 'bayer') rows = Math.max(4, Math.round(rows / 4) * 4);
+    const cols = Math.max(1, Math.round(w / px)), ch = H / rows;
+    const rnd = VM.rng(seedBase);
+    const lvl = new Int16Array(rows * cols);
+    let err = new Float64Array(cols + 2), next = new Float64Array(cols + 2);
+    for (let r = 0; r < rows; r++) {
+      const v0 = tAt((r + 0.5) * ch) * (L - 1);
+      for (let c = 0; c < cols; c++) {
+        let q;
+        if (method === 'diffusion') {
+          // Floyd–Steinberg: push each pixel's rounding error onto its unvisited neighbors.
+          const v = v0 + err[c + 1];
+          q = Math.max(0, Math.min(L - 1, Math.round(v)));
+          const e = v - q;
+          err[c + 2] += (e * 7) / 16; next[c] += (e * 3) / 16; next[c + 1] += (e * 5) / 16; next[c + 2] += e / 16;
+        } else {
+          const base = Math.floor(v0), fr = v0 - base;
+          const thr = method === 'noise' ? rnd() : (BAYER4[r % 4][c % 4] + 0.5) / 16;
+          q = Math.max(0, Math.min(L - 1, base + (fr > thr ? 1 : 0)));
+        }
+        lvl[r * cols + c] = q;
+      }
+      if (method === 'diffusion') { err = next; next = new Float64Array(cols + 2); }
+    }
+    return { rows, cols, ch, L, lvl };
+  }
+
+  // Each color level of a dither grid as one outline (even-odd, with holes) instead of many
+  // small shapes, so viewers draw no hairline seams between same-color neighbors.
+  function ditherRegions(grid, x0, w, color, j) {
+    const cw = w / grid.cols;
+    return traceRegions(grid, 0, grid.rows, 0, grid.cols, (c) => x0 + c * cw, (r) => r * grid.ch, color, j);
+  }
+
+  // Trace the part of a dither grid in rows r0..r1 and columns c0..c1 (end exclusive).
+  // X(c) and Y(r) place the grid's corner lines; clamping them to a box crops the cells at
+  // the box edges exactly, which is how glitch slices and the tile edge cut the dither.
+  function traceRegions(grid, r0, r1, c0, c1, X, Y, color, j) {
+    const { cols, L, lvl } = grid;
+    const on = (r, c, q) => r >= r0 && r < r1 && c >= c0 && c < c1 && lvl[r * cols + c] === q;
+    let out = '';
+    for (let q = 0; q < L; q++) {
+      // Boundary edges of this level's cells, on the grid's corner lattice, keyed by start.
+      const edges = new Map();
+      const add = (a, b) => { const k = a[0] * 100003 + a[1]; (edges.get(k) || edges.set(k, []).get(k)).push(b); };
+      let any = false;
+      for (let r = r0; r < r1; r++) for (let c = c0; c < c1; c++) {
+        if (!on(r, c, q)) continue;
+        any = true;
+        if (!on(r - 1, c, q)) add([c, r], [c + 1, r]);
+        if (!on(r, c + 1, q)) add([c + 1, r], [c + 1, r + 1]);
+        if (!on(r + 1, c, q)) add([c + 1, r + 1], [c, r + 1]);
+        if (!on(r, c - 1, q)) add([c, r + 1], [c, r]);
+      }
+      if (!any) continue;
+      // Follow edges into closed loops, dropping corners in the middle of straight runs.
+      let d = '';
+      for (const [k0, list] of edges) {
+        while (list.length) {
+          const start = [Math.floor(k0 / 100003), k0 % 100003];
+          const loop = [start];
+          let cur = list.pop();
+          while (cur[0] !== start[0] || cur[1] !== start[1]) {
+            loop.push(cur);
+            const nxt = edges.get(cur[0] * 100003 + cur[1]);
+            cur = nxt.pop();
+          }
+          const pts = loop.filter((p, i) => {
+            const a = loop[(i - 1 + loop.length) % loop.length], b = loop[(i + 1) % loop.length];
+            return !((a[0] === p[0] && p[0] === b[0]) || (a[1] === p[1] && p[1] === b[1]));
+          });
+          d += VM.polyPath(pts.map(([c, r]) => [X(c), Y(r)]), true);
+        }
+      }
+      out += `<path data-stripe="${j}" fill-rule="evenodd" d="${d}" fill="${color(q / (L - 1))}"/>`;
+    }
+    return out;
+  }
+
   function texturePieces(s, look, w, H, tAt, color, seedBase) {
     const out = [];
     if (look === 'dither') {
-      const px = Math.max(0.5, Number(s.pixel) || 3);
-      const L = Math.max(2, Math.round(Number(s.levels) || 2));
-      const method = s.dither || 'bayer';
-      // Bayer repeats every 4 rows, so the row count is a multiple of 4 to wrap cleanly.
-      let rows = Math.max(1, Math.round(H / px));
-      if (method === 'bayer') rows = Math.max(4, Math.round(rows / 4) * 4);
-      const cols = Math.max(1, Math.round(w / px)), ch = H / rows;
-      const rnd = VM.rng(seedBase);
-      let err = new Float64Array(cols + 2), next = new Float64Array(cols + 2);
+      // Row runs of the grid; used when effects reshape rows (the whole-region outlines
+      // can't be glitched or ragged row by row).
+      const { rows, cols, ch, L, lvl } = ditherGrid(s, w, H, tAt, seedBase);
       for (let r = 0; r < rows; r++) {
-        const v0 = tAt((r + 0.5) * ch) * (L - 1);
-        let runStart = 0, runLevel = -1;
-        for (let c = 0; c <= cols; c++) {
-          let lvl = -2;
-          if (c < cols) {
-            if (method === 'diffusion') {
-              // Floyd–Steinberg: push each pixel's rounding error onto its unvisited neighbors.
-              const v = v0 + err[c + 1];
-              lvl = Math.max(0, Math.min(L - 1, Math.round(v)));
-              const e = v - lvl;
-              err[c + 2] += (e * 7) / 16; next[c] += (e * 3) / 16; next[c + 1] += (e * 5) / 16; next[c + 2] += e / 16;
-            } else {
-              const base = Math.floor(v0), fr = v0 - base;
-              const thr = method === 'noise' ? rnd() : (BAYER4[r % 4][c % 4] + 0.5) / 16;
-              lvl = Math.max(0, Math.min(L - 1, base + (fr > thr ? 1 : 0)));
-            }
-          }
-          if (lvl !== runLevel) {
-            if (runLevel >= 0) out.push([r * ch, (r + 1) * ch, color(runLevel / (L - 1)), runStart / cols, c / cols]);
-            runStart = c; runLevel = lvl;
+        let runStart = 0;
+        for (let c = 1; c <= cols; c++) {
+          if (c === cols || lvl[r * cols + c] !== lvl[r * cols + runStart]) {
+            out.push([r * ch, (r + 1) * ch, color(lvl[r * cols + runStart] / (L - 1)), runStart / cols, c / cols]);
+            runStart = c;
           }
         }
-        if (method === 'diffusion') { err = next; next = new Float64Array(cols + 2); }
       }
     } else if (look === 'halftone') {
       // Dots of the end color grow on the start color; past halfway the roles swap, so each
@@ -242,7 +312,13 @@
   // Returns the SVG body for a tile of width W and height H. Stripes past maxW are trimmed
   // (no clipping mask); any space left over shows the background.
   // `assets` holds imported SVG art referenced by pattern stripes; `fx` holds effects.
+  let renderCount = 0;
   VM.renderStripes = (stripes, H, assets, maxW = Infinity, fx = {}) => {
+    stripes = VM.flattenStripes(stripes);
+    // Gradient and pattern definitions get names unique to this drawing. The side panel's
+    // group previews and the main preview share one page, and identical names there make the
+    // browser use the wrong drawing's definition (e.g. a 10 px tall gradient).
+    const uid = 's' + (++renderCount).toString(36);
     const n = VM.n;
     const total = VM.stripesTotalPx(stripes);
     const Wt = Number.isFinite(maxW) ? maxW : total; // tile width (shifts wrap around this)
@@ -251,6 +327,10 @@
     { let x = 0; stripes.forEach((s, i) => { const w = VM.stripeWidthPx(s); segs.push({ i, s, x0: x, x1: x + w }); x += w; }); }
 
     // Each solid/gradient stripe's fill as vertical pieces: [[y0, y1, fill], ...] covering 0..H.
+    // Without glitch or ikat, dithers are drawn as whole-region outlines (seam-free).
+    const reshapes = !!(fx.glitch?.on || (fx.ikat?.on && fx.ikat.amount > 0));
+    let regions = '';
+    const ditherInfo = [];
     const pieces = segs.map(({ i, s, x0, x1 }) => {
       if (s.kind === 'pattern') return null;
       const c1 = VM.esc(s.color), c2 = VM.esc(s.color2 || s.color);
@@ -264,7 +344,16 @@
         const tAt = (y) => fadeAt(peak, VM.mod(y / H - off, 1));
         // Exact end colors at 0 and 1, so pure areas stay the colors you picked.
         const color = (t) => (t <= 0 ? c1 : t >= 1 ? c2 : mix(t));
-        return texturePieces(s, look, x1 - x0, H, tAt, color, (Number(s.seed) || 1) * 1009 + i);
+        const seed = (Number(s.seed) || 1) * 1009 + i;
+        if (look === 'dither') {
+          const grid = ditherGrid(s, x1 - x0, H, tAt, seed);
+          // No effects: one outline per color for the whole stripe. With glitch or ikat,
+          // the row loop traces it slice by slice instead (see below).
+          if (!reshapes && x1 <= Wt + 1e-6) regions += ditherRegions(grid, x0, x1 - x0, color, i);
+          else ditherInfo[i] = { grid, color };
+          return [];
+        }
+        return texturePieces(s, look, x1 - x0, H, tAt, color, seed);
       }
       if (look === 'steps' && steps > 0) {
         // Solid horizontal bands, top to bottom. Fade & back samples one full up-and-down
@@ -282,7 +371,7 @@
       }
       // Smooth gradients use tile coordinates (userSpaceOnUse), so any slice or ragged
       // edge of the stripe still shows the right colors for its height.
-      const id = `stripe-grad-${i}`;
+      const id = `${uid}-grad-${i}`;
       const stops = shiftedStops(peak, off).map(([o, t]) => `<stop offset="${n(o)}" stop-color="${t === 0 ? c1 : t === 1 ? c2 : mix(t)}"/>`).join('');
       defs += `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="${n(H)}">${stops}</linearGradient>`;
       return [[0, H, `url(#${id})`]];
@@ -361,6 +450,23 @@
         let a = edges[j], b = edges[j + 1];
         if (b <= a) continue;
         a += shift; b += shift;
+        if (ditherInfo[src]) {
+          // Dither under glitch/ikat: within this slice the stripe's whole span moves (and
+          // stretches) as one, so its dither can still be traced as whole outlines. The
+          // grid is cropped to the slice, and split where the span crosses the tile edge.
+          const { grid, color } = ditherInfo[src];
+          const cw = (b - a) / grid.cols;
+          const rA = Math.max(0, Math.floor(y0 / grid.ch + 1e-9)), rB = Math.min(grid.rows, Math.ceil(y1 / grid.ch - 1e-9));
+          const Y = (r) => Math.min(y1, Math.max(y0, r * grid.ch));
+          const k0 = Math.floor(a / Wt), k1 = Math.floor((b - 1e-9) / Wt);
+          for (let k = k0; k <= k1; k++) {
+            const xa = Math.max(a, k * Wt), xb = Math.min(b, (k + 1) * Wt);
+            const cA = Math.max(0, Math.floor((xa - a) / cw + 1e-9)), cB = Math.min(grid.cols, Math.ceil((xb - a) / cw - 1e-9));
+            const X = (c) => Math.min(xb, Math.max(xa, a + c * cw)) - k * Wt;
+            if (rB > rA && cB > cA) regions += traceRegions(grid, rA, rB, cA, cB, X, Y, color, segs[j].i);
+          }
+          continue;
+        }
         for (const [ya, yb, fill, fa = 0, fb = 1, dot = 0] of pieces[src]) {
           const t0 = Math.max(y0, ya), t1 = Math.min(y1, yb);
           if (t1 <= t0) continue;
@@ -383,7 +489,7 @@
         }
       }
     }
-    let body = chainRows(rects).join('') + dots.join('');
+    let body = chainRows(rects).join('') + regions + dots.join('');
 
     // Pattern stripes: draw the tile once, then place clipped copies across the stripe and
     // k times down it.
@@ -393,22 +499,22 @@
       if (w <= 0) continue;
       const k = VM.patternRepeats(s, H);
       const th = H / k, tw = th * (s.pattern?.aspect || 1);
-      defs += `<g id="stripe-pat-${i}">${VM.patternTile(s.pattern, assets, tw, th)}</g>` +
+      defs += `<g id="${uid}-pat-${i}">${VM.patternTile(s.pattern, assets, tw, th)}</g>` +
         // Each copy's clip overlaps its neighbors by a hair. The pattern repeats exactly, so
         // the overlap shows identical content and just hides anti-aliasing seams.
-        `<clipPath id="stripe-pat-tile-${i}"><rect x="-0.25" y="-0.25" width="${n(tw + 0.5)}" height="${n(th + 0.5)}"/></clipPath>` +
-        `<clipPath id="stripe-pat-clip-${i}"><rect x="${n(x)}" y="0" width="${n(w)}" height="${n(H)}"/></clipPath>`;
+        `<clipPath id="${uid}-pat-tile-${i}"><rect x="-0.25" y="-0.25" width="${n(tw + 0.5)}" height="${n(th + 0.5)}"/></clipPath>` +
+        `<clipPath id="${uid}-pat-clip-${i}"><rect x="${n(x)}" y="0" width="${n(w)}" height="${n(H)}"/></clipPath>`;
       let copies = '';
       for (let c = 0; c * tw < w - 1e-6; c++) {
         for (let r = 0; r < k; r++) {
-          copies += `<g transform="translate(${n(x + c * tw)} ${n(r * th)})" clip-path="url(#stripe-pat-tile-${i})"><use xlink:href="#stripe-pat-${i}"/></g>`;
+          copies += `<g transform="translate(${n(x + c * tw)} ${n(r * th)})" clip-path="url(#${uid}-pat-tile-${i})"><use xlink:href="#${uid}-pat-${i}"/></g>`;
         }
       }
       // A solid strip of the pattern's background behind the copies hides the hairline
       // anti-aliasing gaps that viewers draw where clipped copies meet.
       const under = s.pattern?.source === 'gen' && s.pattern.palette?.bg
         ? `<rect x="${n(x)}" y="0" width="${n(w)}" height="${n(H)}" fill="${VM.esc(s.pattern.palette.bg)}"/>` : '';
-      body += `<g data-stripe="${i}" clip-path="url(#stripe-pat-clip-${i})">${under}${copies}</g>`;
+      body += `<g data-stripe="${i}" clip-path="url(#${uid}-pat-clip-${i})">${under}${copies}</g>`;
     }
 
     // Plaid: the same sequence laid horizontally on top, partly see-through.

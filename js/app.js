@@ -182,7 +182,7 @@
       // stripes clip their own copies, which can spill past the tile.
       // The background only shows if the stripes stop short of the canvas width or an
       // imported SVG has see-through areas; otherwise leave the hidden rectangle out.
-      const items = state.stripes.items;
+      const items = VM.flattenStripes(state.stripes.items);
       return { W, H, bg: state.stripes.bg, body: VM.renderStripes(items, H, state.assets, W, state.stripes.effects),
         needsClip: items.some((s) => s.kind === 'pattern'),
         showBg: total < W - 1e-6 || items.some((s) => s.pattern?.source === 'svg') };
@@ -399,7 +399,9 @@ ${clipped}
     if (i != null) flashStripe(i);
   });
   function flashStripe(i) {
-    const row = document.querySelector(`.stripe[data-index="${i}"]`);
+    // The stripe's own row, or the collapsed group it's tucked inside.
+    const row = document.querySelector(`.stripe[data-index="${i}"]`) ||
+      [...document.querySelectorAll('.stripe[data-indices]')].find((g) => g.dataset.indices.split(',').includes(String(i)));
     if (!row) return;
     row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     row.classList.add('flash');
@@ -431,13 +433,71 @@ ${clipped}
     ];
   }
 
-  function stripesPanel() {
-    const s = state.stripes;
-    const items = s.items;
-    const list = h('ul', { class: 'stripe-list' }, items.map((st, i) =>
-      h('li', { class: 'stripe' + (st.kind === 'pattern' ? ' pattern' : ''), 'data-index': i },
+  // ---- stripe list: rows, groups, and selection
+  // A selection is a run of consecutive rows in one list (the top level or inside a group).
+  let sel = null; // { list, a, b, anchor }
+  const selected = (list, i) => sel && sel.list === list && i >= sel.a && i <= sel.b;
+  function clickIndex(list, i, e) {
+    if (e.shiftKey && sel && sel.list === list) sel = { list, a: Math.min(sel.anchor, i), b: Math.max(sel.anchor, i), anchor: sel.anchor };
+    else if (sel && sel.list === list && sel.a === i && sel.b === i) sel = null;
+    else sel = { list, a: i, b: i, anchor: i };
+    renderPanel();
+  }
+
+  // Groups mirror with their insides reversed too, so a mirrored repeat is truly symmetric.
+  const mirrorClone = (x) => (x.kind === 'group' ? { ...structuredClone(x), items: x.items.slice().reverse().map(mirrorClone) } : structuredClone(x));
+  let groupCount = 0;
+  const nextGroupName = () => { const used = new Set(VM.flattenGroups(state.stripes.items).map((g) => g.name)); do groupCount++; while (used.has(`Group ${groupCount}`)); return `Group ${groupCount}`; };
+
+  // Stripe at a path of indices through groups, e.g. [2, 0] = first stripe in top-level item 2.
+  const listAt = (path) => { let list = state.stripes.items; for (const k of path.slice(0, -1)) list = list[k]?.items || []; return list; };
+  const itemAt = (path) => listAt(path)[path.at(-1)];
+  // Position of a path's first stripe in the flattened sequence (what the preview numbers).
+  function flatIndexOf(path) {
+    let count = 0, list = state.stripes.items;
+    path.forEach((k, depth) => {
+      for (let i = 0; i < k; i++) count += list[i]?.kind === 'group' ? VM.flattenStripes(list[i].items).length : 1;
+      if (depth < path.length - 1) list = list[k].items;
+    });
+    return count;
+  }
+
+  // Rows for one list. `path` locates the list; `flat` counts stripes for numbering.
+  function stripeRows(items, path, flat, updateTotal) {
+    const list = h('ul', { class: 'stripe-list' + (path.length ? ' group-items' : '') }, items.map((st, i) => {
+      const here = [...path, i];
+      const idxBtn = h('button', { class: 'idx', title: 'Select (shift-click another number to select a run of stripes)', onclick: (e) => clickIndex(items, i, e) }, String(i + 1));
+      const cls = (extra) => 'stripe' + extra + (selected(items, i) ? ' selected' : '');
+      if (st.kind === 'group') {
+        const leaves = VM.flattenStripes(st.items);
+        const first = flat.n;
+        const indices = leaves.map((_, k) => first + k).join(',');
+        const wpx = VM.stripesTotalPx(st.items);
+        const thumb = h('span', { class: 'gthumb', title: 'Group preview' });
+        if (wpx > 0) thumb.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${VM.n(wpx)} 10" preserveAspectRatio="none">${VM.renderStripes(st.items, 10, state.assets)}</svg>`;
+        const row = h('li', { class: cls(' group'), 'data-indices': indices },
+          h('span', { class: 'grip', title: 'Drag to reorder' }, '⠿'),
+          idxBtn,
+          h('button', { class: 'icon toggle', title: st.collapsed ? 'Expand' : 'Collapse', onclick: () => { st.collapsed = !st.collapsed; changed({ panel: true }); } }, st.collapsed ? '▸' : '▾'),
+          thumb,
+          h('input', { type: 'text', class: 'gname', value: st.name || 'Group', spellcheck: false, title: 'Group name', oninput: (e) => { st.name = e.target.value; changed(); } }),
+          h('span', { class: 'ginfo' }, `${leaves.length} · ${VM.fmtUnit(wpx, state.unit)}`),
+          h('button', { class: 'icon', title: 'Duplicate group (insert a copy right after it)', onclick: () => { items.splice(i + 1, 0, structuredClone(st)); sel = null; changed({ panel: true }); } }, '⧉'),
+          h('button', { class: 'icon', title: 'Copy group to the end of this list', onclick: () => { items.push(structuredClone(st)); sel = null; changed({ panel: true }); } }, '⇥'),
+          h('button', { class: 'icon', title: 'Ungroup (keep the stripes, remove the group)', onclick: () => { items.splice(i, 1, ...st.items); sel = null; changed({ panel: true }); } }, '⤴'),
+          h('button', { class: 'icon', title: 'Remove group and its stripes', onclick: () => { items.splice(i, 1); sel = null; changed({ panel: true }); } }, '✕'));
+        if (st.collapsed) flat.n += leaves.length;
+        else row.append(stripeRows(st.items, here, flat, updateTotal),
+          h('div', { class: 'gfoot' }, h('button', { title: 'Add a stripe at the end of this group', onclick: () => {
+            const last = st.items.at(-1);
+            st.items.push(last && !last.kind ? { ...last } : { color: '#1f3557', width: 0.25, unit: state.unit === 'px' ? 'in' : state.unit });
+            changed({ panel: true });
+          } }, '+ Stripe in group')));
+        return row;
+      }
+      return h('li', { class: cls(st.kind === 'pattern' ? ' pattern' : ''), 'data-index': flat.n++ },
         h('span', { class: 'grip', title: 'Drag to reorder' }, '⠿'),
-        h('span', { class: 'idx' }, String(i + 1)),
+        idxBtn,
         st.kind === 'pattern' ? patternBadge(st) : colorInput(st.color, (c) => { st.color = c; changed(); }),
         h('input', { type: 'number', min: 0, step: 'any', value: st.width, title: 'Stripe width',
           oninput: (e) => { st.width = num(e.target.value); changed(); updateTotal(); } }),
@@ -454,17 +514,17 @@ ${clipped}
           if (st.gradient && !st.color2) {
             // Start with a neighbor's color (or white) so the fade is visible right away.
             const next = items[i + 1] || items[i - 1];
-            st.color2 = next && next.color !== st.color ? next.color : '#ffffff';
+            st.color2 = next && next.color && next.color !== st.color ? next.color : '#ffffff';
           }
           // Fade & back repeats seamlessly top to bottom, so it's the safer default.
           st.shape = st.shape || 'peak';
           st.steps = st.steps ?? 0;
           changed({ panel: true });
         } }, '◐'),
-        h('button', { class: 'icon', title: 'Duplicate (insert copy right after this stripe)', onclick: () => { items.splice(i + 1, 0, structuredClone(st)); changed({ panel: true }); } }, '⧉'),
-        h('button', { class: 'icon', title: 'Copy to end (append a copy after the last stripe)', onclick: () => { items.push(structuredClone(st)); changed({ panel: true }); } }, '⇥'),
-        h('button', { class: 'icon', title: 'Remove', onclick: () => { items.splice(i, 1); changed({ panel: true }); } }, '✕'),
-        st.kind === 'pattern' ? patternLine(st, i) : null,
+        h('button', { class: 'icon', title: 'Duplicate (insert copy right after this stripe)', onclick: () => { items.splice(i + 1, 0, structuredClone(st)); sel = null; changed({ panel: true }); } }, '⧉'),
+        h('button', { class: 'icon', title: 'Copy to end (append a copy after the last stripe in this list)', onclick: () => { items.push(structuredClone(st)); sel = null; changed({ panel: true }); } }, '⇥'),
+        h('button', { class: 'icon', title: 'Remove', onclick: () => { items.splice(i, 1); sel = null; changed({ panel: true }); } }, '✕'),
+        st.kind === 'pattern' ? patternLine(st, here) : null,
         st.kind !== 'pattern' && st.gradient ? h('div', { class: 'gradline' },
           h('span', { class: 'arrow', title: 'Color the stripe fades to, top to bottom' }, '↓ to'),
           colorInput(st.color2, (c) => { st.color2 = c; changed(); }),
@@ -474,22 +534,50 @@ ${clipped}
         ) : null,
         st.kind !== 'pattern' && st.gradient ? lookControl(st) : null,
         st.kind !== 'pattern' && st.gradient ? shiftControl(st) : null,
-      )));
-
+      );
+    }));
     enableStripeDrag(list, items);
+    return list;
+  }
+
+  // Bar shown while stripes are selected: group them, duplicate them, or clear.
+  function selectionBar() {
+    if (!sel) return null;
+    if (sel.b >= sel.list.length) { sel = null; return null; }
+    const count = sel.b - sel.a + 1;
+    return h('div', { class: 'selbar' },
+      h('span', {}, `${count} selected`),
+      h('button', { class: 'primary', title: 'Collapse the selected stripes into a group', onclick: () => {
+        const group = { kind: 'group', name: nextGroupName(), collapsed: true, items: sel.list.slice(sel.a, sel.b + 1) };
+        sel.list.splice(sel.a, count, group);
+        sel = null;
+        changed({ panel: true });
+      } }, 'Group'),
+      h('button', { title: 'Insert a copy of the selection right after it', onclick: () => {
+        sel.list.splice(sel.b + 1, 0, ...sel.list.slice(sel.a, sel.b + 1).map((x) => structuredClone(x)));
+        sel = null;
+        changed({ panel: true });
+      } }, 'Duplicate selection'),
+      h('button', { class: 'icon', title: 'Clear selection', onclick: () => { sel = null; renderPanel(); } }, '✕'));
+  }
+
+  function stripesPanel() {
+    const s = state.stripes;
+    const items = s.items;
 
     const total = h('div', { class: 'hint' });
     const updateTotal = () => {
-      const px = VM.stripesTotalPx(items);
-      total.textContent = `${items.length} stripe${items.length === 1 ? '' : 's'}, total width ${VM.fmtUnit(px, state.unit)}`;
+      const leaves = VM.flattenStripes(items).length;
+      total.textContent = `${leaves} stripe${leaves === 1 ? '' : 's'}, total width ${VM.fmtUnit(VM.stripesTotalPx(items), state.unit)}`;
     };
+    const list = stripeRows(items, [], { n: 0 }, updateTotal);
     updateTotal();
 
     const addStripe = () => {
       const last = items[items.length - 1];
-      items.push(last && last.kind !== 'pattern' ? { ...last } : { color: '#1f3557', width: 0.25, unit: state.unit === 'px' ? 'in' : state.unit });
+      items.push(last && !last.kind ? { ...last } : { color: '#1f3557', width: 0.25, unit: state.unit === 'px' ? 'in' : state.unit });
       changed({ panel: true });
-      $('#panel').querySelector('.stripe:last-child input.hex')?.focus();
+      $('#panel').querySelector('.stripe-list > .stripe:last-child input.hex')?.focus();
     };
 
     return [
@@ -503,6 +591,7 @@ ${clipped}
       ...stripeEffectsSection(),
       ...stripesInspireSection(),
       h('h3', {}, 'Stripe inventory (left → right)'),
+      selectionBar(),
       list,
       total,
       h('div', { class: 'row' },
@@ -512,12 +601,13 @@ ${clipped}
       ),
       h('div', { class: 'row' },
         h('button', { title: 'Append the stripes in reverse order for a symmetric repeat', onclick: () => {
-          items.push(...items.slice(0, -1).reverse().map((x) => structuredClone(x)));
+          items.push(...items.slice(0, -1).reverse().map(mirrorClone));
+          sel = null;
           changed({ panel: true });
         } }, 'Mirror'),
-        h('button', { onclick: () => { if (confirm('Remove all stripes?')) { items.length = 0; changed({ panel: true }); } } }, 'Clear'),
+        h('button', { onclick: () => { if (confirm('Remove all stripes?')) { items.length = 0; sel = null; changed({ panel: true }); } } }, 'Clear'),
       ),
-      h('p', { class: 'hint' }, 'Drag rows by the ⠿ grip to reorder. ◐ makes a stripe fade top to bottom. "Fade & back" repeats seamlessly when tiles stack; a one-way "Fade ↓" shows a line where they meet. Mirror appends the stripes in reverse order, skipping the last one so the center stripe is not doubled. Click a stripe in the preview to find it in this list. Pattern stripes repeat their tile down the stripe; "+ Pattern stripe" uses whatever is set up in Generative mode, and Import… takes a saved project or any SVG.'),
+      h('p', { class: 'hint' }, 'Click a stripe\'s number to select it; shift-click another to select the run between them, then Group it. Groups collapse to one row you can duplicate (⧉), copy to the end (⇥), drag, or ungroup (⤴). Drag rows by the ⠿ grip to reorder. ◐ makes a stripe fade top to bottom. Mirror appends the stripes in reverse order (groups reversed inside too), skipping the last one so the center isn\'t doubled. Click a stripe in the preview to find it in this list.'),
     ];
   }
 
@@ -538,7 +628,7 @@ ${clipped}
     items.push({ kind: 'pattern', pattern, repeats: Math.max(1, Math.round(H / pattern.height)), width: unit === 'cm' ? 2.5 : 1, unit, color: '#000000' });
     state.mode = 'stripes';
     changed({ panel: true });
-    flashStripe(items.length - 1);
+    flashStripe(VM.flattenStripes(items).length - 1);
   }
 
   // Thumbnail + name shown in place of the color swatch.
@@ -552,7 +642,7 @@ ${clipped}
   }
 
   // Second line of a pattern stripe: repeats, tile size, reseed, edit.
-  function patternLine(st, i) {
+  function patternLine(st, path) {
     const H = VM.toPx(state.canvas.height, state.unit);
     const k = VM.patternRepeats(st, H);
     const th = H / k, tw = th * (st.pattern.aspect || 1);
@@ -565,18 +655,18 @@ ${clipped}
       h('span', { class: 'arrow', title: 'Size of one pattern tile' }, `tile ${VM.fmtUnit(tw, state.unit)} × ${VM.fmtUnit(th, state.unit)}`),
       h('span', { class: 'spacer' }),
       hasSeed ? h('button', { class: 'icon', title: 'New random seed', onclick: () => { st.pattern.params.seed = VM.randomSeed(); changed({ panel: true }); } }, '🎲') : null,
-      gen ? h('button', { title: 'Open this pattern in Generative mode to change its settings', onclick: () => editPatternStripe(i) }, 'Edit') : null,
+      gen ? h('button', { title: 'Open this pattern in Generative mode to change its settings', onclick: () => editPatternStripe(path) }, 'Edit') : null,
     );
   }
 
   // Open a pattern stripe in Generative mode. The canvas becomes the stripe's tile size;
   // everything Generative mode had before is stashed and restored afterwards.
-  function editPatternStripe(i) {
-    const st = state.stripes.items[i], p = st.pattern;
+  function editPatternStripe(path) {
+    const st = itemAt(path), p = st.pattern;
     const H = VM.toPx(state.canvas.height, state.unit);
     const k = VM.patternRepeats(st, H);
     const round = (v) => (state.unit === 'px' ? Math.round(v * 100) / 100 : Math.round(v * 10000) / 10000);
-    state.editSession = { index: i, gen: structuredClone(state.gen), canvas: { ...state.canvas } };
+    state.editSession = { path, index: flatIndexOf(path), gen: structuredClone(state.gen), canvas: { ...state.canvas } };
     state.gen.type = p.type;
     state.gen.params[p.type] = { ...VM.defaultParams(VM.GENERATORS[p.type]), ...structuredClone(p.params) };
     state.gen.palette = structuredClone(p.palette);
@@ -592,7 +682,8 @@ ${clipped}
     const pattern = currentGenPattern();
     state.gen = ses.gen;
     state.canvas = ses.canvas;
-    const st = state.stripes.items[ses.index];
+    // Older sessions stored a top-level index; newer ones a path through groups.
+    const st = ses.path ? itemAt(ses.path) : state.stripes.items[ses.index];
     if (save && st?.kind === 'pattern') {
       st.pattern = pattern;
       st.repeats = Math.max(1, Math.round(VM.toPx(state.canvas.height, state.unit) / pattern.height));
@@ -600,7 +691,7 @@ ${clipped}
     state.editSession = null;
     state.mode = 'stripes';
     changed({ panel: true });
-    flashStripe(ses.index);
+    flashStripe(ses.path ? flatIndexOf(ses.path) : ses.index);
   }
 
   // Import a saved project (its Generative pattern) or an SVG file as a pattern stripe.
@@ -700,7 +791,8 @@ ${clipped}
   function enableStripeDrag(list, items) {
     list.addEventListener('pointerdown', (e) => {
       const row = e.target.closest('.stripe');
-      if (!row || e.button !== 0 || e.target.closest('input, select, button')) return;
+      // Rows inside a group's list are handled by that list's own drag handler.
+      if (!row || row.parentElement !== list || e.button !== 0 || e.target.closest('input, select, button')) return;
       e.preventDefault();
       const rows = [...list.children];
       const from = rows.indexOf(row);
@@ -1067,7 +1159,7 @@ ${clipped}
     download(`${slug()}-${suffix}.svg`, exportSvg(tile), 'image/svg+xml');
   });
   $('#btn-save').addEventListener('click', () => {
-    const used = new Set(state.stripes.items.map((s) => s.pattern?.asset).filter(Boolean));
+    const used = new Set(VM.flattenStripes(state.stripes.items).map((s) => s.pattern?.asset).filter(Boolean));
     const assets = Object.fromEntries(Object.entries(state.assets).filter(([id]) => used.has(id)));
     download(`${slug()}.vectormaker.json`, JSON.stringify({ ...state, assets }, null, 2), 'application/json');
   });

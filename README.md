@@ -10,6 +10,12 @@ Open `index.html` in Chrome, Safari, or Firefox. There's nothing to install and 
 
 **Stripes.** Build an inventory of vertical stripes. Each stripe has its own color and width (px, in, or cm). **+ Add stripe** stacks a new stripe flush against the right edge. You can reorder, duplicate, or delete stripes, and **Mirror** makes a symmetric repeat. By default the canvas width equals the total stripe width, so the exported tile repeats seamlessly.
 
+**Groups.** Click a stripe's number to select it, and shift-click another to select the run between them. Then click **Group**. A group collapses to one row with a preview, a name, and its width. You can:
+- duplicate it (⧉), copy it to the end (⇥), drag it, ungroup it (⤴), or expand it to edit its stripes;
+- put groups inside groups.
+
+**Mirror** reverses each group's inside order too, so mirrored repeats stay symmetric.
+
 Stripes can also fade top to bottom (◐), with a wrapping vertical shift. A fade's **look** can be:
 - **smooth**
 - **steps**
