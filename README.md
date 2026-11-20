@@ -50,6 +50,7 @@ Effects apply to solid and gradient stripes; pattern stripes are left as they ar
 | Ridgelines | Stacked noise ridges in the *Unknown Pleasures* style, each hiding the ones behind it |
 | Camouflage | Woodland, tiger stripe, digital, splinter, flecktarn, and chocolate-chip camo. Each ink color is one layer |
 | Aztec / Southwestern bands | Blanket-style bands of stepped diamonds, chevrons, mountains, crosses, arrows, checks, and pinstripes on a weaving grid, optionally mirrored like a serape. Exports as rectangles |
+| Abstract paint | Multi-color splotches with splatter and drips, impressionistic brushstrokes over an underpainting, cut-paper shapes, or all three mixed |
 
 Anything that crosses a tile edge is also drawn on the opposite edge, and the export is clipped to the tile.
 
@@ -75,6 +76,6 @@ HEIC photos (iPhone) work too. Safari reads them natively; in other browsers the
 
 - `js/util.js`: units, seeded RNG, seamless-wrap helper, tileable Perlin noise
 - `js/stripes.js`: stripe rendering
-- `js/generators.js`, `js/generators-art.js`, `js/generators-camo.js`, `js/generators-aztec.js`: generative patterns. Each one declares its `params` (the UI is built from these) and a `render(W, H, params, palette)` function, so a new pattern is one object.
+- `js/generators.js`, `js/generators-art.js`, `js/generators-camo.js`, `js/generators-aztec.js`, `js/generators-abstract.js`: generative patterns. Each one declares its `params` (the UI is built from these) and a `render(W, H, params, palette)` function, so a new pattern is one object.
 - `js/inspire.js`: picture analysis and pattern/stripe suggestions
 - `js/app.js`: state, panels, preview, save/open/export
